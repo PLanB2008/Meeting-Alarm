@@ -1,0 +1,23 @@
+# blacklist.yaml — meetings whose title matches any pattern below are silently ignored.
+#
+# Patterns are Python regular expressions, matched case-insensitively anywhere in the title.
+# A plain word or phrase acts as a substring match — no special syntax needed.
+# Re-read automatically on every poll cycle, so changes take effect without a restart.
+#
+# ── plain substring examples (uncomment to enable) ───────────────────────────
+#
+# - "Lunch"              # any meeting with "Lunch" in the title
+# - "OOO"                # out-of-office / busy blocks
+# - "Focus Time"         # focus / deep-work blocks
+# - "Coffee Chat"
+#
+# ── regex examples ────────────────────────────────────────────────────────────
+#
+# - "^Daily Standup$"        # exact title match (anchored)
+# - "standup|sync"           # matches either word
+# - "1:1 with (Alice|Bob)"   # specific people
+# - "\\bhold\\b"             # whole-word match for "hold"
+# - "^\\[tentative\\]"       # titles starting with [tentative]
+
+patterns:
+#  - "^Lunch Blocker$" 

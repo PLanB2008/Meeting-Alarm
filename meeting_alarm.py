@@ -17,11 +17,18 @@ import sys
 import json
 import pickle
 import re
+import queue
 from pathlib import Path
 
 import yaml
+import rumps
  
 # ── Google Calendar imports (installed during setup) ──────────────────────────
+from typing import Any as _Any
+Credentials: _Any = None
+InstalledAppFlow: _Any = None
+Request: _Any = None
+build: _Any = None
 try:
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -383,18 +390,70 @@ def format_event_time(event: dict) -> str:
  
 # ── Already-alerted set (avoid double-triggering same event) ─────────────────
 alerted: set[str] = set()
- 
-def monitor_loop():
-    if not GCAL_AVAILABLE:
-        print("❌  Google Calendar libraries not installed. Run: pip3 install -r requirements.txt")
-        sys.exit(1)
- 
-    print("🔐  Authenticating with Google Calendar…")
-    creds   = get_credentials()
-    service = build("calendar", "v3", credentials=creds)
+
+# ── Tray app shared state ─────────────────────────────────────────────────────
+_alarm_queue: queue.Queue = queue.Queue()
+_menu_lock  = threading.Lock()
+_menu_state: dict = {'lines': [], 'next_str': 'Loading…', 'dirty': False}
+
+
+class MeetingAlarmApp(rumps.App):
+    def __init__(self) -> None:
+        super().__init__("🔔 Loading…", quit_button=None)  # type: ignore[arg-type]
+        self._build_menu()
+        rumps.Timer(self._tick, 1).start()
+
+    def _build_menu(self) -> None:
+        self.menu.clear()
+        with _menu_lock:
+            lines    = list(_menu_state['lines'])
+            next_str = _menu_state['next_str']
+
+        # Status header
+        header = rumps.MenuItem(f"⏰  {next_str}")
+        header.set_callback(None)
+        self.menu.add(header)
+        self.menu.add(None)   # separator
+
+        # Per-meeting rows
+        if lines:
+            for line in lines:
+                item = rumps.MenuItem(line)
+                item.set_callback(None)
+                self.menu.add(item)
+        else:
+            placeholder = rumps.MenuItem("No meetings today")
+            placeholder.set_callback(None)
+            self.menu.add(placeholder)
+
+        self.menu.add(None)   # separator
+        self.menu.add(rumps.MenuItem("Quit", callback=lambda _: rumps.quit_application()))
+
+    def _tick(self, _) -> None:
+        # Process pending alarms on the main thread (tkinter requirement)
+        try:
+            title, t_str, url = _alarm_queue.get_nowait()
+            show_alarm_window(title, t_str, url)
+        except queue.Empty:
+            pass
+
+        # Rebuild menu and update title when background thread has new data
+        with _menu_lock:
+            dirty    = _menu_state['dirty']
+            next_str = _menu_state['next_str']
+            if dirty:
+                _menu_state['dirty'] = False
+        if dirty:
+            self.title = next_str
+            self._build_menu()
+
+
+def _build_day_state(service: object) -> None:
+    """Fetch today's events, update _menu_state, and print the console table."""
     local_now  = datetime.datetime.now(datetime.timezone.utc).astimezone()
     end_of_day = local_now.replace(hour=23, minute=59, second=59, microsecond=0)
-    minutes_until_end = int((end_of_day - local_now).total_seconds() / 60)
+    minutes_until_end = max(1, int((end_of_day - local_now).total_seconds() / 60))
+
     blacklist    = load_blacklist()
     all_today    = [ev for ev in fetch_upcoming_events(service, window_minutes=minutes_until_end)
                     if ev["start"].get("dateTime")]
@@ -406,70 +465,111 @@ def monitor_loop():
         None
     )
     if next_ev:
-        title   = next_ev.get("summary", "Untitled Meeting")
-        delta_m = int((datetime.datetime.fromisoformat(next_ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
-        next_str = f"Next meeting \"{title}\" in {delta_m} min"
+        title    = next_ev.get("summary", "Untitled Meeting")
+        delta_m  = int((datetime.datetime.fromisoformat(next_ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
+        next_str = f"{title} in {delta_m} min"
     else:
         next_str = "No more meetings today"
 
+    # Build menu lines
+    menu_lines = []
+    for ev in all_today:
+        title   = ev.get("summary", "Untitled Meeting")
+        t_str   = format_event_time(ev)
+        url     = extract_meeting_url(ev)
+        link    = "  🔗" if url else ""
+        delta_m = int((datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
+        if delta_m > 0:
+            when = f"in {delta_m} min"
+        elif delta_m > -60:
+            when = f"{-delta_m} min ago"
+        else:
+            when = "earlier today"
+        icon = "🔕" if is_blacklisted(title, blacklist) else "🔔"
+        menu_lines.append(f"{icon}  {t_str}  {title}  ({when}){link}")
+
+    with _menu_lock:
+        _menu_state['lines']    = menu_lines
+        _menu_state['next_str'] = next_str
+        _menu_state['dirty']    = True
+
+    # Console output
     print(f"✅  Connected. Checking every {POLL_INTERVAL_SECS}s for meetings within "
           f"{ALERT_MINUTES_BEFORE} min… {next_str}\n    Press Ctrl+C to stop.\n")
-
     if all_today:
         print("📅  Today's meetings:")
-        for ev in all_today:
-            title    = ev.get("summary", "Untitled Meeting")
-            t_str    = format_event_time(ev)
-            url      = extract_meeting_url(ev)
-            link     = f"  🔗 {url}" if url else ""
-            delta_m  = int((datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
-            if delta_m > 0:
-                when = f"in {delta_m} min"
-            elif delta_m > -60:
-                when = f"{-delta_m} min ago"
-            else:
-                when = "earlier today"
-            if is_blacklisted(title, blacklist):
-                print(f"   {t_str:>8}  🔕 {title}  ({when}){link}")
-            else:
-                print(f"   {t_str:>8}  🔔 {title}  ({when}){link}")
+        for line in menu_lines:
+            print(f"   {line}")
     else:
         print("📅  No meetings today.")
     print()
- 
+
+
+
+def monitor_loop(service: object) -> None:
+    _build_day_state(service)
+
     while True:
         try:
-            blacklist = load_blacklist()
-            events = fetch_upcoming_events(service, window_minutes=ALERT_MINUTES_BEFORE + 1)
-            now = datetime.datetime.now(datetime.timezone.utc)
+            # Re-fetch full day so menu and alarm detection stay in sync
+            local_now  = datetime.datetime.now(datetime.timezone.utc).astimezone()
+            end_of_day = local_now.replace(hour=23, minute=59, second=59, microsecond=0)
+            minutes_until_end = max(1, int((end_of_day - local_now).total_seconds() / 60))
 
-            for ev in events:
-                ev_id  = ev.get("id", "")
-                start  = ev["start"].get("dateTime")
-                if not start or ev_id in alerted:
-                    continue
-                if is_blacklisted(ev.get("summary", ""), blacklist):
-                    continue
- 
-                start_dt = datetime.datetime.fromisoformat(start)
-                delta    = (start_dt - now).total_seconds() / 60  # minutes until start
- 
-                if -1 <= delta <= ALERT_MINUTES_BEFORE:
+            blacklist    = load_blacklist()
+            all_today    = [ev for ev in fetch_upcoming_events(service, window_minutes=minutes_until_end)
+                            if ev["start"].get("dateTime")]
+            active_today = [ev for ev in all_today if not is_blacklisted(ev.get("summary", ""), blacklist)]
+
+            # Rebuild menu state
+            next_ev = next(
+                (ev for ev in active_today
+                 if (datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() > 0),
+                None
+            )
+            next_str = (
+                f"{next_ev.get('summary', 'Meeting')} in "
+                f"{int((datetime.datetime.fromisoformat(next_ev['start']['dateTime']) - local_now).total_seconds() / 60)} min"
+                if next_ev else "No more meetings today"
+            )
+            menu_lines = []
+            for ev in all_today:
+                title   = ev.get("summary", "Untitled Meeting")
+                t_str   = format_event_time(ev)
+                url     = extract_meeting_url(ev)
+                link    = "  🔗" if url else ""
+                delta_m = int((datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
+                if delta_m > 0:
+                    when = f"in {delta_m} min"
+                elif delta_m > -60:
+                    when = f"{-delta_m} min ago"
+                else:
+                    when = "earlier today"
+                icon = "🔕" if is_blacklisted(title, blacklist) else "🔔"
+                menu_lines.append(f"{icon}  {t_str}  {title}  ({when}){link}")
+
+            with _menu_lock:
+                _menu_state['lines']    = menu_lines
+                _menu_state['next_str'] = next_str
+                _menu_state['dirty']    = True
+
+            # Alarm detection
+            now = datetime.datetime.now(datetime.timezone.utc)
+            for ev in active_today:
+                ev_id    = ev.get("id", "")
+                start_dt = datetime.datetime.fromisoformat(ev["start"]["dateTime"])
+                delta    = (start_dt - now).total_seconds() / 60
+                if ev_id not in alerted and -1 <= delta <= ALERT_MINUTES_BEFORE:
                     alerted.add(ev_id)
-                    title   = ev.get("summary", "Untitled Meeting")
-                    t_str   = format_event_time(ev)
-                    url     = extract_meeting_url(ev)
- 
+                    title = ev.get("summary", "Untitled Meeting")
+                    t_str = format_event_time(ev)
+                    url   = extract_meeting_url(ev)
                     print(f"🔔  Alarm triggered: {title!r} at {t_str}")
-                    # Run alarm in main thread (tkinter requirement)
-                    show_alarm_window(title, t_str, url)
- 
-        except KeyboardInterrupt:
-            print("\n👋  Meeting alarm stopped.")
-            sys.exit(0)
+                    _alarm_queue.put((title, t_str, url))
+
         except Exception as e:
             print(f"⚠️  Error: {e}")
- 
+
         time.sleep(POLL_INTERVAL_SECS)
  
  
@@ -486,5 +586,15 @@ if __name__ == "__main__":
         )
         print("✅  Demo complete.")
     else:
-        monitor_loop()
+        if not GCAL_AVAILABLE:
+            print("❌  Google Calendar libraries not installed. Run: pip3 install -r requirements.txt")
+            sys.exit(1)
+        print("🔐  Authenticating with Google Calendar…")
+        _creds   = get_credentials()
+        _service = build("calendar", "v3", credentials=_creds)
+
+        _monitor_thread = threading.Thread(target=monitor_loop, args=(_service,), daemon=True)
+        _monitor_thread.start()
+
+        MeetingAlarmApp().run()
  

@@ -45,7 +45,7 @@ CREDS_FILE   = Path(__file__).parent / "credentials.json"
  
 ALERT_MINUTES_BEFORE = 2   # show alarm this many minutes before meeting start
 POLL_INTERVAL_SECS   = 30  # how often to check calendar (seconds)
-ALARM_VOLUME         = 1.0 # 0.0 (silent) → 1.0 (full device volume)
+ALARM_VOLUME         = 0.8 # 0.0 (silent) → 1.0 (full device volume)
 
 BLACKLIST_FILE = Path(__file__).parent / "blacklist.yaml"
 
@@ -175,7 +175,9 @@ def play_alarm(stop_event: threading.Event):
     global _builtin_speaker_id, _ca_dev_id, _ca_dev_queried
 
     sounds = [
-        "./chrysalyn-loopable-phone-chime-notification-sound-547390.mp3",
+        #"./chrysalyn-loopable-phone-chime-notification-sound-547390.mp3",
+        #"./koiroylers-concise-notification-355741.mp3",
+        "./tunetank.com_notification-warning-alert.wav",
         #"/System/Library/Sounds/Hero.aiff",
         #"/System/Library/Sounds/Blow.aiff",
     ]
@@ -233,11 +235,8 @@ def play_alarm(stop_event: threading.Event):
             _ca_set_volume(_ca_dev_id, original_volume)
 
 # ── Fullscreen blackout overlay ───────────────────────────────────────────────
-def show_alarm_window(event_title: str, event_time: str, meeting_url: str | None):
-    """
-    Block the screen with a fullscreen overlay.
-    Returns only after the user clicks the confirm button.
-    """
+def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | None) -> None:
+    """Tkinter fullscreen alarm. Must run in a process where tkinter owns NSApplication."""
     stop_sound = threading.Event()
     sound_thread = threading.Thread(target=play_alarm, args=(stop_sound,), daemon=True)
     sound_thread.start()
@@ -273,12 +272,16 @@ def show_alarm_window(event_title: str, event_time: str, meeting_url: str | None
              bg="#0a0a0a", fg="#aaaaaa").pack(pady=(0, 40))
  
     def dismiss():
+        if after_id[0] is not None:
+            root.after_cancel(after_id[0])
         stop_sound.set()
         if meeting_url:
             subprocess.Popen(["open", meeting_url])
         root.destroy()
- 
+
     def dismiss_no_url():
+        if after_id[0] is not None:
+            root.after_cancel(after_id[0])
         stop_sound.set()
         root.destroy()
  
@@ -306,22 +309,41 @@ def show_alarm_window(event_title: str, event_time: str, meeting_url: str | None
     # Pulsing border animation
     pulse_colors = ["#ff3b30", "#ff6961", "#ff3b30", "#cc0000"]
     pulse_idx = [0]
- 
+    after_id = [None]
+
     def pulse():
-        if not root.winfo_exists():
-            return
-        c = pulse_colors[pulse_idx[0] % len(pulse_colors)]
-        canvas.configure(highlightbackground=c)
-        root.configure(bg=c if pulse_idx[0] % 2 == 0 else "#0a0a0a")
-        # flash the canvas background subtly
-        canvas.configure(bg="#1a0000" if pulse_idx[0] % 2 == 0 else "#0a0a0a")
-        frame.configure(bg="#1a0000" if pulse_idx[0] % 2 == 0 else "#0a0a0a")
-        pulse_idx[0] += 1
-        root.after(600, pulse)
- 
-    pulse()
-    root.mainloop()
+        try:
+            c = pulse_colors[pulse_idx[0] % len(pulse_colors)]
+            canvas.configure(highlightbackground=c)
+            root.configure(bg=c if pulse_idx[0] % 2 == 0 else "#0a0a0a")
+            canvas.configure(bg="#1a0000" if pulse_idx[0] % 2 == 0 else "#0a0a0a")
+            frame.configure(bg="#1a0000" if pulse_idx[0] % 2 == 0 else "#0a0a0a")
+            pulse_idx[0] += 1
+            after_id[0] = root.after(600, pulse)
+        except tk.TclError:
+            pass
+
+    after_id[0] = root.after(600, pulse)
+    # Manual event loop instead of mainloop() — avoids AppKit run-loop conflict
+    # when called from a rumps NSTimer callback.
+    while True:
+        try:
+            root.update()
+            root.update_idletasks()
+        except tk.TclError:
+            break
+        time.sleep(0.01)
     stop_sound.set()   # ensure sound stops if window closed any other way
+
+
+def show_alarm_window(event_title: str, event_time: str, meeting_url: str | None) -> None:
+    """Launch the alarm in a subprocess so tkinter and rumps don't share NSApplication."""
+    import json
+    payload = json.dumps({'title': event_title, 'time': event_time, 'url': meeting_url or ''})
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), '--alarm', payload],
+        close_fds=True,
+    )
  
 # ── Google Calendar ───────────────────────────────────────────────────────────
 def get_credentials():
@@ -380,6 +402,22 @@ def extract_meeting_url(event: dict) -> str | None:
     return None
  
  
+def format_delta(delta_m: int) -> str:
+    """Return a human-readable relative time string for a delta in minutes."""
+    if delta_m > 0:
+        h, m = divmod(delta_m, 60)
+        if h and m:
+            return f"in {h}h {m} min"
+        elif h:
+            return f"in {h}h"
+        else:
+            return f"in {m} min"
+    elif delta_m > -60:
+        return f"{-delta_m} min ago"
+    else:
+        return "earlier today"
+
+
 def format_event_time(event: dict) -> str:
     start = event["start"].get("dateTime", event["start"].get("date"))
     try:
@@ -404,18 +442,12 @@ class MeetingAlarmApp(rumps.App):
         rumps.Timer(self._tick, 1).start()
 
     def _build_menu(self) -> None:
+        # Use a unique numeric suffix for each item key to avoid collisions
+        # when meeting titles repeat or when separator keys clash.
         self.menu.clear()
         with _menu_lock:
-            lines    = list(_menu_state['lines'])
-            next_str = _menu_state['next_str']
+            lines = list(_menu_state['lines'])
 
-        # Status header
-        header = rumps.MenuItem(f"⏰  {next_str}")
-        header.set_callback(None)
-        self.menu.add(header)
-        self.menu.add(None)   # separator
-
-        # Per-meeting rows
         if lines:
             for line in lines:
                 item = rumps.MenuItem(line)
@@ -426,16 +458,23 @@ class MeetingAlarmApp(rumps.App):
             placeholder.set_callback(None)
             self.menu.add(placeholder)
 
-        self.menu.add(None)   # separator
+        # Single separator before Quit avoids the double-None key collision
+        self.menu.add(None)
         self.menu.add(rumps.MenuItem("Quit", callback=lambda _: rumps.quit_application()))
 
     def _tick(self, _) -> None:
-        # Process pending alarms on the main thread (tkinter requirement)
+        # Process pending alarms on the main thread (tkinter requirement).
+        # Keep alarm handling separate from queue.Empty so errors surface.
+        alarm: tuple | None = None
         try:
-            title, t_str, url = _alarm_queue.get_nowait()
-            show_alarm_window(title, t_str, url)
+            alarm = _alarm_queue.get_nowait()
         except queue.Empty:
             pass
+        if alarm is not None:
+            try:
+                show_alarm_window(*alarm)
+            except Exception as e:
+                print(f"⚠️  Alarm window error: {e}", flush=True)
 
         # Rebuild menu and update title when background thread has new data
         with _menu_lock:
@@ -467,7 +506,7 @@ def _build_day_state(service: object) -> None:
     if next_ev:
         title    = next_ev.get("summary", "Untitled Meeting")
         delta_m  = int((datetime.datetime.fromisoformat(next_ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
-        next_str = f"{title} in {delta_m} min"
+        next_str = f"{title} {format_delta(delta_m)}"
     else:
         next_str = "No more meetings today"
 
@@ -479,14 +518,8 @@ def _build_day_state(service: object) -> None:
         url     = extract_meeting_url(ev)
         link    = "  🔗" if url else ""
         delta_m = int((datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
-        if delta_m > 0:
-            when = f"in {delta_m} min"
-        elif delta_m > -60:
-            when = f"{-delta_m} min ago"
-        else:
-            when = "earlier today"
         icon = "🔕" if is_blacklisted(title, blacklist) else "🔔"
-        menu_lines.append(f"{icon}  {t_str}  {title}  ({when}){link}")
+        menu_lines.append(f"{icon}  {t_str}  {title}  ({format_delta(delta_m)}){link}")
 
     with _menu_lock:
         _menu_state['lines']    = menu_lines
@@ -527,11 +560,11 @@ def monitor_loop(service: object) -> None:
                  if (datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() > 0),
                 None
             )
-            next_str = (
-                f"{next_ev.get('summary', 'Meeting')} in "
-                f"{int((datetime.datetime.fromisoformat(next_ev['start']['dateTime']) - local_now).total_seconds() / 60)} min"
-                if next_ev else "No more meetings today"
-            )
+            if next_ev:
+                _dm = int((datetime.datetime.fromisoformat(next_ev['start']['dateTime']) - local_now).total_seconds() / 60)
+                next_str = f"{next_ev.get('summary', 'Meeting')} {format_delta(_dm)}"
+            else:
+                next_str = "No more meetings today"
             menu_lines = []
             for ev in all_today:
                 title   = ev.get("summary", "Untitled Meeting")
@@ -539,14 +572,8 @@ def monitor_loop(service: object) -> None:
                 url     = extract_meeting_url(ev)
                 link    = "  🔗" if url else ""
                 delta_m = int((datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
-                if delta_m > 0:
-                    when = f"in {delta_m} min"
-                elif delta_m > -60:
-                    when = f"{-delta_m} min ago"
-                else:
-                    when = "earlier today"
                 icon = "🔕" if is_blacklisted(title, blacklist) else "🔔"
-                menu_lines.append(f"{icon}  {t_str}  {title}  ({when}){link}")
+                menu_lines.append(f"{icon}  {t_str}  {title}  ({format_delta(delta_m)}){link}")
 
             with _menu_lock:
                 _menu_state['lines']    = menu_lines
@@ -575,11 +602,22 @@ def monitor_loop(service: object) -> None:
  
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Internal: spawned by show_alarm_window() to display the alarm in a clean process
+    if "--alarm" in sys.argv:
+        import json as _json
+        _idx = sys.argv.index("--alarm")
+        if _idx + 1 >= len(sys.argv):
+            print("Usage: meeting_alarm.py --alarm '<json>'")
+            sys.exit(1)
+        _data = _json.loads(sys.argv[_idx + 1])
+        _alarm_window_direct(_data.get("title", ""), _data.get("time", ""), _data.get("url") or None)
+        sys.exit(0)
+
     # Quick demo mode: python3 meeting_alarm.py --demo
     if "--demo" in sys.argv:
         print("🎬  Demo mode — showing alarm in 1 second…")
         time.sleep(1)
-        show_alarm_window(
+        _alarm_window_direct(
             "Weekly Team Standup",
             "10:00 AM",
             "https://meet.google.com/abc-defg-hij"
@@ -595,6 +633,10 @@ if __name__ == "__main__":
 
         _monitor_thread = threading.Thread(target=monitor_loop, args=(_service,), daemon=True)
         _monitor_thread.start()
+
+        # Hide Python from the Dock — menu bar only, alarm windows still work fine
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory  # type: ignore[import-untyped]
+        NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
         MeetingAlarmApp().run()
  

@@ -1,0 +1,28 @@
+# Meeting Alarm configuration
+# Changes take effect on the next restart.
+
+# Calendar source: "google" or "macos"
+#   google — reads your primary Google Calendar (requires credentials.json, see SETUP.md)
+#   macos  — reads from the macOS Calendar app (all accounts synced there)
+calendar_source: google
+
+# (macos only) Which calendars to include. Leave empty to include all calendars.
+# Run `python3 meeting_alarm.py --list-calendars` to see available names.
+# Example:
+#   macos_calendars:
+#     - "Personal"
+#     - "Work"
+#macos_calendars: []
+#macos_calendars:
+#  - "andreas.till@magnolia-cms.com"
+##  - "Tabandy"
+#  - "Termine"
+
+# Minutes before a meeting starts to trigger the alarm
+alert_minutes_before: 2
+
+# How often the calendar is polled (seconds)
+poll_interval_secs: 30
+
+# Volume of the built-in speakers during the alarm (0.0 = silent, 1.0 = full)
+alarm_volume: 0.8

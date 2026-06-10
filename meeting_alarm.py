@@ -15,37 +15,16 @@ import subprocess
 import os
 import sys
 import json
-import pickle
 import re
 import queue
 from pathlib import Path
 
 import yaml
 import rumps
- 
-# ── Google Calendar imports (installed during setup) ──────────────────────────
-from typing import Any as _Any
-Credentials: _Any = None
-InstalledAppFlow: _Any = None
-Request: _Any = None
-build: _Any = None
-try:
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from google.auth.transport.requests import Request
-    from googleapiclient.discovery import build
-    GCAL_AVAILABLE = True
-except ImportError:
-    GCAL_AVAILABLE = False
- 
-# ── Config ────────────────────────────────────────────────────────────────────
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
-TOKEN_FILE   = Path.home() / ".meeting_alarm_token.pickle"
-CREDS_FILE   = Path(__file__).parent / "credentials.json"
- 
-ALERT_MINUTES_BEFORE = 2   # show alarm this many minutes before meeting start
-POLL_INTERVAL_SECS   = 30  # how often to check calendar (seconds)
-ALARM_VOLUME         = 0.8 # 0.0 (silent) → 1.0 (full device volume)
+
+import calendar_google
+import calendar_macos
+import config
 
 BLACKLIST_FILE = Path(__file__).parent / "blacklist.yaml"
 
@@ -174,10 +153,11 @@ def play_alarm(stop_event: threading.Event):
     """Loop a sound through the built-in speaker at ALARM_VOLUME until stop_event is set."""
     global _builtin_speaker_id, _ca_dev_id, _ca_dev_queried
 
+    _here = Path(__file__).parent
     sounds = [
-        #"./chrysalyn-loopable-phone-chime-notification-sound-547390.mp3",
-        #"./koiroylers-concise-notification-355741.mp3",
-        "./tunetank.com_notification-warning-alert.wav",
+        str(_here / "sounds" / "tunetank.com_notification-warning-alert.wav"),
+        #str(_here / "sounds" / "chrysalyn-loopable-phone-chime-notification-sound-547390.mp3"),
+        #str(_here / "sounds" / "koiroylers-concise-notification-355741.mp3"),
         #"/System/Library/Sounds/Hero.aiff",
         #"/System/Library/Sounds/Blow.aiff",
     ]
@@ -207,7 +187,7 @@ def play_alarm(stop_event: threading.Event):
     original_volume: float | None = None
     if _ca_dev_id is not None:
         original_volume = _ca_get_volume(_ca_dev_id)
-        _ca_set_volume(_ca_dev_id, ALARM_VOLUME)
+        _ca_set_volume(_ca_dev_id, config.ALARM_VOLUME)
 
     try:
         while not stop_event.is_set():
@@ -345,45 +325,6 @@ def show_alarm_window(event_title: str, event_time: str, meeting_url: str | None
         close_fds=True,
     )
  
-# ── Google Calendar ───────────────────────────────────────────────────────────
-def get_credentials():
-    creds = None
-    if TOKEN_FILE.exists():
-        with open(TOKEN_FILE, "rb") as f:
-            creds = pickle.load(f)
- 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not CREDS_FILE.exists():
-                print(f"\n❌  credentials.json not found at {CREDS_FILE}")
-                print("    See SETUP.md for how to create it.\n")
-                sys.exit(1)
-            flow = InstalledAppFlow.from_client_secrets_file(str(CREDS_FILE), SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(TOKEN_FILE, "wb") as f:
-            pickle.dump(creds, f)
- 
-    return creds
- 
- 
-def fetch_upcoming_events(service, window_minutes: int = 60):
-    """Return events starting within the next `window_minutes` minutes."""
-    now = datetime.datetime.now(datetime.timezone.utc)
-    time_min = now.isoformat().replace('+00:00', 'Z')
-    time_max = (now + datetime.timedelta(minutes=window_minutes)).isoformat().replace('+00:00', 'Z')
- 
-    result = service.events().list(
-        calendarId="primary",
-        timeMin=time_min,
-        timeMax=time_max,
-        singleEvents=True,
-        orderBy="startTime",
-    ).execute()
-    return result.get("items", [])
- 
- 
 def extract_meeting_url(event: dict) -> str | None:
     """Try to find a Google Meet / Zoom / Teams link in the event."""
     # Google Meet
@@ -487,6 +428,16 @@ class MeetingAlarmApp(rumps.App):
             self._build_menu()
 
 
+def _fetch_all_events(service, window_minutes: int) -> list[dict]:
+    """Return today's events from the configured calendar source (see config.yaml)."""
+    if config.CALENDAR_SOURCE == "macos":
+        events = calendar_macos.fetch_events(window_minutes=window_minutes,
+                                             calendars=config.MACOS_CALENDARS)
+    else:
+        events = calendar_google.fetch_events(service, window_minutes=window_minutes)
+    return [ev for ev in events if ev["start"].get("dateTime")]
+
+
 def _build_day_state(service: object) -> None:
     """Fetch today's events, update _menu_state, and print the console table."""
     local_now  = datetime.datetime.now(datetime.timezone.utc).astimezone()
@@ -494,8 +445,7 @@ def _build_day_state(service: object) -> None:
     minutes_until_end = max(1, int((end_of_day - local_now).total_seconds() / 60))
 
     blacklist    = load_blacklist()
-    all_today    = [ev for ev in fetch_upcoming_events(service, window_minutes=minutes_until_end)
-                    if ev["start"].get("dateTime")]
+    all_today    = _fetch_all_events(service, minutes_until_end)
     active_today = [ev for ev in all_today if not is_blacklisted(ev.get("summary", ""), blacklist)]
 
     next_ev = next(
@@ -527,8 +477,8 @@ def _build_day_state(service: object) -> None:
         _menu_state['dirty']    = True
 
     # Console output
-    print(f"✅  Connected. Checking every {POLL_INTERVAL_SECS}s for meetings within "
-          f"{ALERT_MINUTES_BEFORE} min… {next_str}\n    Press Ctrl+C to stop.\n")
+    print(f"✅  Connected. Checking every {config.POLL_INTERVAL_SECS}s for meetings within "
+          f"{config.ALERT_MINUTES_BEFORE} min… {next_str}\n    Press Ctrl+C to stop.\n")
     if all_today:
         print("📅  Today's meetings:")
         for line in menu_lines:
@@ -550,8 +500,7 @@ def monitor_loop(service: object) -> None:
             minutes_until_end = max(1, int((end_of_day - local_now).total_seconds() / 60))
 
             blacklist    = load_blacklist()
-            all_today    = [ev for ev in fetch_upcoming_events(service, window_minutes=minutes_until_end)
-                            if ev["start"].get("dateTime")]
+            all_today    = _fetch_all_events(service, minutes_until_end)
             active_today = [ev for ev in all_today if not is_blacklisted(ev.get("summary", ""), blacklist)]
 
             # Rebuild menu state
@@ -586,7 +535,7 @@ def monitor_loop(service: object) -> None:
                 ev_id    = ev.get("id", "")
                 start_dt = datetime.datetime.fromisoformat(ev["start"]["dateTime"])
                 delta    = (start_dt - now).total_seconds() / 60
-                if ev_id not in alerted and -1 <= delta <= ALERT_MINUTES_BEFORE:
+                if ev_id not in alerted and -1 <= delta <= config.ALERT_MINUTES_BEFORE:
                     alerted.add(ev_id)
                     title = ev.get("summary", "Untitled Meeting")
                     t_str = format_event_time(ev)
@@ -597,7 +546,7 @@ def monitor_loop(service: object) -> None:
         except Exception as e:
             print(f"⚠️  Error: {e}")
 
-        time.sleep(POLL_INTERVAL_SECS)
+        time.sleep(config.POLL_INTERVAL_SECS)
  
  
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -613,6 +562,19 @@ if __name__ == "__main__":
         _alarm_window_direct(_data.get("title", ""), _data.get("time", ""), _data.get("url") or None)
         sys.exit(0)
 
+    # List macOS calendars: python3 meeting_alarm.py --list-calendars
+    if "--list-calendars" in sys.argv:
+        names = calendar_macos.list_calendars()
+        if names:
+            print("📅  Available macOS calendars:")
+            for name in names:
+                print(f"   - {name!r}")
+            print()
+            print("Add the ones you want to config.yaml under 'macos_calendars'.")
+        else:
+            print("⚠️  No calendars found (or access not granted).")
+        sys.exit(0)
+
     # Quick demo mode: python3 meeting_alarm.py --demo
     if "--demo" in sys.argv:
         print("🎬  Demo mode — showing alarm in 1 second…")
@@ -624,12 +586,16 @@ if __name__ == "__main__":
         )
         print("✅  Demo complete.")
     else:
-        if not GCAL_AVAILABLE:
-            print("❌  Google Calendar libraries not installed. Run: pip3 install -r requirements.txt")
-            sys.exit(1)
-        print("🔐  Authenticating with Google Calendar…")
-        _creds   = get_credentials()
-        _service = build("calendar", "v3", credentials=_creds)
+        if config.CALENDAR_SOURCE == "macos":
+            print("📅  Using macOS Calendar app as event source.")
+            _service = None
+        else:
+            if not calendar_google.GCAL_AVAILABLE:
+                print("❌  Google Calendar libraries not installed. Run: pip3 install -r requirements.txt")
+                sys.exit(1)
+            print("🔐  Authenticating with Google Calendar…")
+            _creds   = calendar_google.get_credentials()
+            _service = calendar_google.build("calendar", "v3", credentials=_creds)
 
         _monitor_thread = threading.Thread(target=monitor_loop, args=(_service,), daemon=True)
         _monitor_thread.start()

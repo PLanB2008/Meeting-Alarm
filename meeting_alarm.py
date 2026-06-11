@@ -574,9 +574,12 @@ class MeetingAlarmApp(rumps.App):
             lines = list(_menu_state['lines'])
 
         if lines:
-            for line in lines:
-                item = rumps.MenuItem(line)
-                item.set_callback(None)
+            for label, url in lines:
+                if url:
+                    item = rumps.MenuItem(label, callback=lambda _, u=url: subprocess.Popen(["open", u]))
+                else:
+                    item = rumps.MenuItem(label)
+                    item.set_callback(None)
                 self.menu.add(item)
         else:
             placeholder = rumps.MenuItem("No meetings today")
@@ -656,7 +659,7 @@ def _poll(service) -> tuple[list[dict], list[dict]]:
         link    = "  🔗" if url else ""
         delta_m = int((datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
         icon    = "🔕" if is_blacklisted(title, blacklist) else "🔔"
-        menu_lines.append(f"{icon}  {t_str}  {title}  ({format_delta(delta_m)}){link}")
+        menu_lines.append((f"{icon}  {t_str}  {title}  ({format_delta(delta_m)}){link}", url))
 
     with _menu_lock:
         _menu_state['lines']        = menu_lines

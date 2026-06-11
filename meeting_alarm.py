@@ -153,15 +153,7 @@ def play_alarm(stop_event: threading.Event):
     """Loop a sound through the built-in speaker at ALARM_VOLUME until stop_event is set."""
     global _builtin_speaker_id, _ca_dev_id, _ca_dev_queried
 
-    _here = Path(__file__).parent
-    sounds = [
-        str(_here / "sounds" / "tunetank.com_notification-warning-alert.wav"),
-        #str(_here / "sounds" / "chrysalyn-loopable-phone-chime-notification-sound-547390.mp3"),
-        #str(_here / "sounds" / "koiroylers-concise-notification-355741.mp3"),
-        #"/System/Library/Sounds/Hero.aiff",
-        #"/System/Library/Sounds/Blow.aiff",
-    ]
-    sound = next((s for s in sounds if os.path.exists(s)), None)
+    sound = next((s for s in config.ALARM_SOUNDS if os.path.exists(s)), None)
 
     if SOUNDDEVICE_AVAILABLE and _builtin_speaker_id is None:
         _builtin_speaker_id = find_builtin_speaker_id()
@@ -363,7 +355,7 @@ def format_event_time(event: dict) -> str:
     start = event["start"].get("dateTime", event["start"].get("date"))
     try:
         dt = datetime.datetime.fromisoformat(start)
-        return dt.strftime("%-I:%M %p")
+        return dt.strftime("%H:%M") if config.USE_24H_TIME else dt.strftime("%-I:%M %p")
     except Exception:
         return start
  

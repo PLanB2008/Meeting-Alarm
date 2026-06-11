@@ -20,4 +20,4 @@
 # - "^\\[tentative\\]"       # titles starting with [tentative]
 
 patterns:
-#  - "^Lunch Blocker$" 
+  - "^Lunch Blocker$" 

@@ -1,2 +1,14 @@
-Meeting Alarm.App
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# App bundle (built by build_app.sh)
+Meeting Alarm.app
+
+# Google Calendar credentials and auth token
 credentials.json
+*.pickle

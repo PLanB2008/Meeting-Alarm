@@ -1,14 +1,15 @@
 # Meeting Alarm — Setup Guide
 
 A hard-to-dismiss macOS alarm that blacks out your screen and plays a sound
-until you confirm your meeting. Runs as a menu bar app. Works with Google Calendar.
+until you confirm your meeting. Runs as a menu bar app. Supports Google Calendar
+and the macOS Calendar app.
 
 ---
 
 ## What it does
 
 - Lives in your **menu bar**, showing the next upcoming meeting (e.g. `Weekly Sync in 12 min`)
-- Checks your Google Calendar every 30 seconds
+- Checks your calendar every 30 seconds — countdown updates live every minute
 - **2 minutes before any meeting**: blacks out your entire screen, plays an alarm sound on your built-in speakers
 - Shows a **"Join Meeting"** button that opens Google Meet / Zoom / Teams directly
 - Screen stays blocked until you click a button — no accidental dismissal
@@ -22,12 +23,43 @@ Open **Terminal** and run:
 
 ```bash
 pip3 install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client \
-             rumps sounddevice soundfile pyyaml
+             rumps sounddevice soundfile pyyaml pyobjc-framework-EventKit
 ```
 
 ---
 
-## Step 2 — Create a Google Calendar API credential
+## Step 2 — Connect your calendar
+
+Open `config.yaml` and set `calendar_source` to either `google` or `macos`.
+
+### Option A: macOS Calendar app (easier)
+
+Set `calendar_source: macos` in `config.yaml`. No credentials needed — the app reads
+directly from the Calendar app on your Mac, including any accounts synced there
+(iCloud, Exchange, Google, etc.).
+
+On first launch macOS will ask for Calendar access. Grant it in
+**System Settings → Privacy & Security → Calendars**.
+
+To see which calendar names are available:
+
+```bash
+python3 meeting_alarm.py --list-calendars
+```
+
+Then filter to specific calendars in `config.yaml`:
+
+```yaml
+macos_calendars:
+  - "Work"
+  - "Personal"
+```
+
+Leave `macos_calendars: []` to include all calendars.
+
+### Option B: Google Calendar (direct API)
+
+Set `calendar_source: google` in `config.yaml`, then create an API credential:
 
 1. Go to: https://console.cloud.google.com/
 2. Click **"Select a project"** → **"New Project"** → name it "Meeting Alarm" → **Create**
@@ -43,6 +75,8 @@ pip3 install google-auth google-auth-oauthlib google-auth-httplib2 google-api-py
 9. Click **Download JSON** on the credential that appears
 10. Rename the downloaded file to **`credentials.json`**
 11. Move it to the **same folder** as `meeting_alarm.py`
+
+On first launch a browser window will open asking you to authorise the app. This only happens once.
 
 ---
 
@@ -60,7 +94,6 @@ This creates **`Meeting Alarm.app`** in the same folder. You can:
 - Add it to your Dock
 
 The app runs as a **menu bar only** app — no Dock icon, no window until an alarm fires.
-
 To rebuild after changing the code, just run `bash build_app.sh` again.
 
 #### Optional: custom icon
@@ -72,15 +105,10 @@ converted and bundled automatically.
 
 ## Step 3 (alternative) — Run from Terminal
 
-If you prefer not to build the app:
-
 ```bash
 cd /path/to/meeting-alarm
 python3 meeting_alarm.py
 ```
-
-The first time it runs, a browser window will open asking you to authorise the app
-with your Google account. Click through and allow it. This only happens once.
 
 ---
 
@@ -97,7 +125,7 @@ This shows the alarm immediately (no calendar needed) so you can see what it loo
 ## Blacklist
 
 To suppress alarms for specific meetings, edit `blacklist.yaml` in the project folder.
-The file is re-read on every poll cycle — no restart needed.
+Changes take effect on the next poll cycle — no restart needed.
 
 ```yaml
 patterns:
@@ -114,7 +142,7 @@ Blacklisted meetings still appear in the menu dropdown with a 🔕 icon, but no 
 
 **Easiest:** Go to **System Settings → General → Login Items** and add `Meeting Alarm.app`.
 
-**Alternative (LaunchAgent):** replace the path with where your `.app` actually lives:
+**Alternative (LaunchAgent):**
 
 ```bash
 cat > ~/Library/LaunchAgents/com.meetingalarm.plist << 'EOF'
@@ -142,23 +170,31 @@ launchctl load ~/Library/LaunchAgents/com.meetingalarm.plist
 
 ## Customise
 
-Open `meeting_alarm.py` in any text editor and change these lines near the top:
+All settings live in **`config.yaml`**. Changes take effect on the next restart.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `ALERT_MINUTES_BEFORE` | `2` | Minutes before a meeting to trigger the alarm |
-| `POLL_INTERVAL_SECS` | `30` | How often the calendar is checked |
-| `ALARM_VOLUME` | `0.8` | Built-in speaker volume during the alarm (0.0 – 1.0) |
+| `calendar_source` | `google` | Calendar source: `google` or `macos` |
+| `macos_calendars` | `[]` | (macOS only) Calendar names to include; empty = all |
+| `alert_minutes_before` | `2` | Minutes before a meeting to trigger the alarm |
+| `poll_interval_secs` | `30` | How often the calendar is checked |
+| `alarm_volume` | `0.8` | Built-in speaker volume during the alarm (0.0–1.0) |
+| `alarm_sounds` | (built-in WAV) | Ordered list of sound files; first existing file is used |
+| `use_24h_time` | `false` | `true` = 14:30 format, `false` = 2:30 PM |
 
 ---
 
 ## Troubleshooting
 
-**"credentials.json not found"** — Make sure the file is in the same folder as `meeting_alarm.py`.
+**"credentials.json not found"** — Only needed for `calendar_source: google`. Make sure the
+file is in the same folder as `meeting_alarm.py`.
+
+**macOS Calendar: access denied** — Go to **System Settings → Privacy & Security → Calendars**
+and enable access for Terminal (or Meeting Alarm.app). Then restart the app.
 
 **No sound / wrong device** — The app targets the built-in MacBook speakers regardless of
-your default audio device. If sound doesn't play, check that your Mac's internal volume is
-not muted and that `sounddevice` is installed (`pip3 install sounddevice soundfile`).
+your default audio device. Check that your Mac's internal volume is not muted and that
+`sounddevice` is installed (`pip3 install sounddevice soundfile`).
 
 **Alarm doesn't cover all screens** — Only the primary screen is covered. Multi-monitor
 support can be added on request.

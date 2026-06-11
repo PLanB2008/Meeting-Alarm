@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Meeting Alarm for macOS — Google Calendar Edition
+Meeting Alarm for macOS
 Blacks out your screen and plays a loud alarm until you confirm.
+Supports Google Calendar and the macOS Calendar app.
  
 Setup: See SETUP.md
 Run:  python3 meeting_alarm.py
@@ -310,7 +311,6 @@ def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | N
 
 def show_alarm_window(event_title: str, event_time: str, meeting_url: str | None) -> None:
     """Launch the alarm in a subprocess so tkinter and rumps don't share NSApplication."""
-    import json
     payload = json.dumps({'title': event_title, 'time': event_time, 'url': meeting_url or ''})
     subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve()), '--alarm', payload],
@@ -319,19 +319,23 @@ def show_alarm_window(event_title: str, event_time: str, meeting_url: str | None
  
 def extract_meeting_url(event: dict) -> str | None:
     """Try to find a Google Meet / Zoom / Teams link in the event."""
-    # Google Meet
-    entry = event.get("hangoutLink")
-    if entry:
+    import html as _html
+    if entry := event.get("hangoutLink"):
         return entry
-    # Check description for common URLs
-    desc = event.get("description", "") or ""
+    desc = _html.unescape(event.get("description", "") or "")
+    keywords = ["meet.google.com", "zoom.us/j/", "teams.microsoft.com"]
+    # href="..." attributes (Google Calendar wraps URLs in HTML)
+    for m in re.finditer(r'href=["\']([^"\']+)["\']', desc):
+        if any(kw in m.group(1) for kw in keywords):
+            return m.group(1)
+    # Plain text fallback
     for line in desc.splitlines():
-        for keyword in ["meet.google.com", "zoom.us/j/", "teams.microsoft.com"]:
-            if keyword in line:
-                # crude URL extraction
+        for kw in keywords:
+            if kw in line:
                 for word in line.split():
-                    if keyword in word:
-                        return word.strip().strip("<>")
+                    word = word.strip().strip("<>").rstrip(".,;)")
+                    if kw in word:
+                        return word
     return None
  
  
@@ -345,6 +349,8 @@ def format_delta(delta_m: int) -> str:
             return f"in {h}h"
         else:
             return f"in {m} min"
+    elif delta_m == 0:
+        return "now"
     elif delta_m > -60:
         return f"{-delta_m} min ago"
     else:
@@ -365,7 +371,12 @@ alerted: set[str] = set()
 # ── Tray app shared state ─────────────────────────────────────────────────────
 _alarm_queue: queue.Queue = queue.Queue()
 _menu_lock  = threading.Lock()
-_menu_state: dict = {'lines': [], 'next_str': 'Loading…', 'dirty': False}
+_menu_state: dict = {
+    'lines':        [],
+    'next_dt':      None,  # ISO datetime str of the next upcoming event
+    'next_summary': '',    # title of the next upcoming event
+    'dirty':        False,
+}
 
 
 class MeetingAlarmApp(rumps.App):
@@ -396,8 +407,6 @@ class MeetingAlarmApp(rumps.App):
         self.menu.add(rumps.MenuItem("Quit", callback=lambda _: rumps.quit_application()))
 
     def _tick(self, _) -> None:
-        # Process pending alarms on the main thread (tkinter requirement).
-        # Keep alarm handling separate from queue.Empty so errors surface.
         alarm: tuple | None = None
         try:
             alarm = _alarm_queue.get_nowait()
@@ -409,15 +418,24 @@ class MeetingAlarmApp(rumps.App):
             except Exception as e:
                 print(f"⚠️  Alarm window error: {e}", flush=True)
 
-        # Rebuild menu and update title when background thread has new data
         with _menu_lock:
-            dirty    = _menu_state['dirty']
-            next_str = _menu_state['next_str']
+            dirty        = _menu_state['dirty']
+            next_dt      = _menu_state['next_dt']
+            next_summary = _menu_state['next_summary']
             if dirty:
                 _menu_state['dirty'] = False
+
+        # Rebuild menu items only when the event list has changed
         if dirty:
-            self.title = next_str
             self._build_menu()
+
+        # Recalculate title every tick so the countdown stays in sync
+        if next_dt:
+            local_now = datetime.datetime.now(datetime.timezone.utc).astimezone()
+            delta_m   = int((datetime.datetime.fromisoformat(next_dt) - local_now).total_seconds() / 60)
+            self.title = f"{next_summary} {format_delta(delta_m)}"
+        else:
+            self.title = "No more meetings today"
 
 
 def _fetch_all_events(service, window_minutes: int) -> list[dict]:
@@ -430,29 +448,24 @@ def _fetch_all_events(service, window_minutes: int) -> list[dict]:
     return [ev for ev in events if ev["start"].get("dateTime")]
 
 
-def _build_day_state(service: object) -> None:
-    """Fetch today's events, update _menu_state, and print the console table."""
-    local_now  = datetime.datetime.now(datetime.timezone.utc).astimezone()
-    end_of_day = local_now.replace(hour=23, minute=59, second=59, microsecond=0)
+def _poll(service) -> tuple[list[dict], list[dict]]:
+    """Fetch today's events, update _menu_state, return (all_today, active_today)."""
+    local_now         = datetime.datetime.now(datetime.timezone.utc).astimezone()
+    end_of_day        = local_now.replace(hour=23, minute=59, second=59, microsecond=0)
     minutes_until_end = max(1, int((end_of_day - local_now).total_seconds() / 60))
 
     blacklist    = load_blacklist()
     all_today    = _fetch_all_events(service, minutes_until_end)
     active_today = [ev for ev in all_today if not is_blacklisted(ev.get("summary", ""), blacklist)]
 
-    next_ev = next(
+    next_ev      = next(
         (ev for ev in active_today
          if (datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() > 0),
         None
     )
-    if next_ev:
-        title    = next_ev.get("summary", "Untitled Meeting")
-        delta_m  = int((datetime.datetime.fromisoformat(next_ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
-        next_str = f"{title} {format_delta(delta_m)}"
-    else:
-        next_str = "No more meetings today"
+    next_dt      = next_ev["start"]["dateTime"] if next_ev else None
+    next_summary = next_ev.get("summary", "Untitled Meeting") if next_ev else ""
 
-    # Build menu lines
     menu_lines = []
     for ev in all_today:
         title   = ev.get("summary", "Untitled Meeting")
@@ -460,15 +473,34 @@ def _build_day_state(service: object) -> None:
         url     = extract_meeting_url(ev)
         link    = "  🔗" if url else ""
         delta_m = int((datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
-        icon = "🔕" if is_blacklisted(title, blacklist) else "🔔"
+        icon    = "🔕" if is_blacklisted(title, blacklist) else "🔔"
         menu_lines.append(f"{icon}  {t_str}  {title}  ({format_delta(delta_m)}){link}")
 
     with _menu_lock:
-        _menu_state['lines']    = menu_lines
-        _menu_state['next_str'] = next_str
-        _menu_state['dirty']    = True
+        _menu_state['lines']        = menu_lines
+        _menu_state['next_dt']      = next_dt
+        _menu_state['next_summary'] = next_summary
+        _menu_state['dirty']        = True
 
-    # Console output
+    return all_today, active_today
+
+
+def _build_day_state(service: object) -> None:
+    """Initial fetch: populate menu and print today's schedule to the console."""
+    all_today, _ = _poll(service)
+
+    with _menu_lock:
+        next_dt      = _menu_state['next_dt']
+        next_summary = _menu_state['next_summary']
+        menu_lines   = list(_menu_state['lines'])
+
+    if next_dt:
+        local_now = datetime.datetime.now(datetime.timezone.utc).astimezone()
+        delta_m   = int((datetime.datetime.fromisoformat(next_dt) - local_now).total_seconds() / 60)
+        next_str  = f"{next_summary} {format_delta(delta_m)}"
+    else:
+        next_str = "No more meetings today"
+
     print(f"✅  Connected. Checking every {config.POLL_INTERVAL_SECS}s for meetings within "
           f"{config.ALERT_MINUTES_BEFORE} min… {next_str}\n    Press Ctrl+C to stop.\n")
     if all_today:
@@ -480,46 +512,16 @@ def _build_day_state(service: object) -> None:
     print()
 
 
-
 def monitor_loop(service: object) -> None:
     _build_day_state(service)
 
     while True:
         try:
-            # Re-fetch full day so menu and alarm detection stay in sync
-            local_now  = datetime.datetime.now(datetime.timezone.utc).astimezone()
-            end_of_day = local_now.replace(hour=23, minute=59, second=59, microsecond=0)
-            minutes_until_end = max(1, int((end_of_day - local_now).total_seconds() / 60))
+            all_today, active_today = _poll(service)
 
-            blacklist    = load_blacklist()
-            all_today    = _fetch_all_events(service, minutes_until_end)
-            active_today = [ev for ev in all_today if not is_blacklisted(ev.get("summary", ""), blacklist)]
-
-            # Rebuild menu state
-            next_ev = next(
-                (ev for ev in active_today
-                 if (datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() > 0),
-                None
-            )
-            if next_ev:
-                _dm = int((datetime.datetime.fromisoformat(next_ev['start']['dateTime']) - local_now).total_seconds() / 60)
-                next_str = f"{next_ev.get('summary', 'Meeting')} {format_delta(_dm)}"
-            else:
-                next_str = "No more meetings today"
-            menu_lines = []
-            for ev in all_today:
-                title   = ev.get("summary", "Untitled Meeting")
-                t_str   = format_event_time(ev)
-                url     = extract_meeting_url(ev)
-                link    = "  🔗" if url else ""
-                delta_m = int((datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
-                icon = "🔕" if is_blacklisted(title, blacklist) else "🔔"
-                menu_lines.append(f"{icon}  {t_str}  {title}  ({format_delta(delta_m)}){link}")
-
-            with _menu_lock:
-                _menu_state['lines']    = menu_lines
-                _menu_state['next_str'] = next_str
-                _menu_state['dirty']    = True
+            # Prune IDs from previous days so the set doesn't grow forever
+            today_ids = {ev.get("id", "") for ev in all_today}
+            alerted.intersection_update(today_ids)
 
             # Alarm detection
             now = datetime.datetime.now(datetime.timezone.utc)

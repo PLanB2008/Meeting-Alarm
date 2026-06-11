@@ -29,6 +29,14 @@ import config
 
 BLACKLIST_FILE = Path(__file__).parent / "blacklist.yaml"
 
+
+def _tk_btn(parent, text: str, command, bg: str, fg: str = "white", **kw) -> tk.Label:
+    """Colored button that works on macOS (tk.Button ignores bg/fg there)."""
+    lbl = tk.Label(parent, text=text, bg=bg, fg=fg, cursor="hand2", **kw)
+    lbl.bind("<Button-1>", lambda _: command())
+    return lbl
+
+
 # ── Blacklist ─────────────────────────────────────────────────────────────────
 def load_blacklist() -> list[re.Pattern]:
     """Read blacklist.yaml and return compiled regex patterns."""
@@ -262,22 +270,17 @@ def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | N
     btn_frame.pack()
  
     if meeting_url:
-        tk.Button(
-            btn_frame, text="🚀  Join Meeting",
-            font=("SF Pro Display", 22, "bold"),
-            bg="#30d158", fg="#000000", activebackground="#25a244",
-            padx=40, pady=18, bd=0, cursor="hand2",
-            command=dismiss
-        ).pack(side="left", padx=12)
- 
-    tk.Button(
-        btn_frame,
-        text="✓  I'm On It" if not meeting_url else "Dismiss",
-        font=("SF Pro Display", 18),
-        bg="#1c1c1e", fg="#ffffff", activebackground="#2c2c2e",
-        padx=30, pady=18, bd=0, cursor="hand2",
-        command=dismiss_no_url
-    ).pack(side="left", padx=12)
+        _tk_btn(btn_frame, "🚀  Join Meeting", dismiss,
+                bg="#30d158", fg="#000000",
+                font=("SF Pro Display", 22, "bold"),
+                padx=40, pady=18).pack(side="left", padx=12)
+
+    _tk_btn(btn_frame,
+            "✓  I'm On It" if not meeting_url else "Dismiss",
+            dismiss_no_url,
+            bg="#1c1c1e", fg="#ffffff",
+            font=("SF Pro Display", 18),
+            padx=30, pady=18).pack(side="left", padx=12)
  
     # Pulsing border animation
     pulse_colors = ["#ff3b30", "#ff6961", "#ff3b30", "#cc0000"]
@@ -316,7 +319,185 @@ def show_alarm_window(event_title: str, event_time: str, meeting_url: str | None
         [sys.executable, str(Path(__file__).resolve()), '--alarm', payload],
         close_fds=True,
     )
- 
+
+
+def _prefs_window_direct() -> None:
+    """Preferences window — runs in its own subprocess so tkinter owns NSApplication."""
+    _CONFIG_FILE = Path(__file__).parent / "config.yaml"
+
+    _DEFAULTS = {
+        "calendar_source":      "google",
+        "macos_calendars":      [],
+        "alert_minutes_before": 2,
+        "poll_interval_secs":   30,
+        "alarm_volume":         0.8,
+        "use_24h_time":         True,
+        "alarm_sounds":         ["sounds/tunetank.com_notification-warning-alert.wav"],
+    }
+
+    try:
+        with open(_CONFIG_FILE) as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception:
+        cfg = {}
+    for k, v in _DEFAULTS.items():
+        cfg.setdefault(k, v)
+
+    BG       = "#1e1e1e"
+    FG       = "#e0e0e0"
+    ACCENT   = "#4a9eff"
+    ENTRY_BG = "#2d2d2d"
+
+    root = tk.Tk()
+    root.title("Meeting Alarm — Preferences")
+    root.configure(bg=BG)
+    root.resizable(False, False)
+
+    # Center on screen
+    root.update_idletasks()
+    root.geometry("+%d+%d" % (
+        root.winfo_screenwidth() // 2 - 260,
+        root.winfo_screenheight() // 2 - 280,
+    ))
+
+    def _lbl(r: int, text: str) -> None:
+        tk.Label(root, text=text, bg=BG, fg=FG, font=("Helvetica Neue", 12),
+                 justify="right", anchor="e").grid(
+                 row=r, column=0, sticky="ne", padx=(20, 8), pady=6)
+
+    tk.Label(root, text="Preferences", bg=BG, fg=ACCENT,
+             font=("Helvetica Neue", 17, "bold")).grid(
+             row=0, column=0, columnspan=2, padx=20, pady=(18, 14))
+
+    row = 1
+
+    # Calendar source
+    _lbl(row, "Calendar source:")
+    cal_var = tk.StringVar(value=cfg["calendar_source"])
+    cal_f = tk.Frame(root, bg=BG)
+    cal_f.grid(row=row, column=1, sticky="w", padx=(0, 20), pady=6)
+    for val, label in [("google", "Google Calendar"), ("macos", "macOS Calendar")]:
+        tk.Radiobutton(cal_f, text=label, variable=cal_var, value=val,
+                       bg=BG, fg=FG, selectcolor=ENTRY_BG, activebackground=BG,
+                       font=("Helvetica Neue", 12)).pack(side="left", padx=(0, 14))
+    row += 1
+
+    # macOS calendars
+    _lbl(row, "macOS calendars\n(one per line):")
+    macos_txt = tk.Text(root, width=34, height=4, bg=ENTRY_BG, fg=FG,
+                        insertbackground=FG, relief="flat", font=("Menlo", 11),
+                        padx=6, pady=4)
+    macos_txt.grid(row=row, column=1, sticky="w", padx=(0, 20), pady=6)
+    macos_txt.insert("1.0", "\n".join(cfg.get("macos_calendars") or []))
+    row += 1
+
+    # Alert minutes before
+    _lbl(row, "Alert minutes before:")
+    alert_var = tk.IntVar(value=cfg["alert_minutes_before"])
+    tk.Spinbox(root, from_=0, to=60, textvariable=alert_var, width=5,
+               bg=ENTRY_BG, fg=FG, buttonbackground=ENTRY_BG, insertbackground=FG,
+               relief="flat", font=("Helvetica Neue", 12)).grid(
+               row=row, column=1, sticky="w", padx=(0, 20), pady=6)
+    row += 1
+
+    # Poll interval
+    _lbl(row, "Poll interval (secs):")
+    poll_var = tk.IntVar(value=cfg["poll_interval_secs"])
+    tk.Spinbox(root, from_=10, to=600, textvariable=poll_var, width=5,
+               bg=ENTRY_BG, fg=FG, buttonbackground=ENTRY_BG, insertbackground=FG,
+               relief="flat", font=("Helvetica Neue", 12)).grid(
+               row=row, column=1, sticky="w", padx=(0, 20), pady=6)
+    row += 1
+
+    # Alarm volume
+    _lbl(row, "Alarm volume:")
+    vol_var = tk.DoubleVar(value=cfg["alarm_volume"])
+    vol_f = tk.Frame(root, bg=BG)
+    vol_f.grid(row=row, column=1, sticky="w", padx=(0, 20), pady=6)
+    vol_label = tk.Label(vol_f, text=f"{cfg['alarm_volume']:.0%}", bg=BG, fg=FG,
+                         font=("Helvetica Neue", 11), width=5)
+    def _update_vol_label(*_):
+        vol_label.config(text=f"{vol_var.get():.0%}")
+    vol_var.trace_add("write", _update_vol_label)
+    tk.Scale(vol_f, variable=vol_var, from_=0.0, to=1.0, resolution=0.05,
+             orient="horizontal", length=180, showvalue=False,
+             bg=BG, fg=FG, troughcolor=ENTRY_BG, highlightthickness=0).pack(side="left")
+    vol_label.pack(side="left", padx=(6, 0))
+    row += 1
+
+    # 24-hour time
+    _lbl(row, "24-hour time:")
+    h24_var = tk.BooleanVar(value=bool(cfg["use_24h_time"]))
+    tk.Checkbutton(root, variable=h24_var,
+                   bg=BG, fg=FG, selectcolor=ENTRY_BG, activebackground=BG,
+                   font=("Helvetica Neue", 12)).grid(
+                   row=row, column=1, sticky="w", padx=(0, 20), pady=6)
+    row += 1
+
+    # Alarm sounds
+    _lbl(row, "Alarm sounds\n(one per line):")
+    sounds_txt = tk.Text(root, width=44, height=4, bg=ENTRY_BG, fg=FG,
+                         insertbackground=FG, relief="flat", font=("Menlo", 10),
+                         padx=6, pady=4)
+    sounds_txt.grid(row=row, column=1, sticky="w", padx=(0, 20), pady=6)
+    sounds_txt.insert("1.0", "\n".join(cfg.get("alarm_sounds") or []))
+    row += 1
+
+    # Status label
+    status_var = tk.StringVar(value="")
+    tk.Label(root, textvariable=status_var, bg=BG, fg="#88cc88",
+             font=("Helvetica Neue", 11)).grid(
+             row=row, column=0, columnspan=2, pady=(4, 0))
+    row += 1
+
+    def _save() -> None:
+        new_cfg = {
+            "calendar_source":      cal_var.get(),
+            "macos_calendars":      [l.strip() for l in macos_txt.get("1.0", "end").splitlines() if l.strip()],
+            "alert_minutes_before": alert_var.get(),
+            "poll_interval_secs":   poll_var.get(),
+            "alarm_volume":         round(vol_var.get(), 2),
+            "use_24h_time":         bool(h24_var.get()),
+            "alarm_sounds":         [l.strip() for l in sounds_txt.get("1.0", "end").splitlines() if l.strip()],
+        }
+        try:
+            header = "# Meeting Alarm configuration\n# Changes take effect on the next restart.\n\n"
+            with open(_CONFIG_FILE, "w") as f:
+                f.write(header)
+                yaml.dump(new_cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            status_var.set("Saved — restart to apply")
+            restart_btn.pack(side="left", padx=(12, 0))
+        except Exception as e:
+            status_var.set(f"Error saving: {e}")
+
+    def _restart() -> None:
+        import os, signal
+        ppid = os.getppid()
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve())], close_fds=True)
+        try:
+            os.kill(ppid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        root.destroy()
+
+    btn_f = tk.Frame(root, bg=BG)
+    btn_f.grid(row=row, column=0, columnspan=2, pady=(10, 22))
+    _tk_btn(btn_f, "Save", _save, bg=ACCENT,
+            font=("Helvetica Neue", 13, "bold"), padx=28, pady=8).pack(side="left")
+    restart_btn = _tk_btn(btn_f, "Restart Now", _restart, bg="#cc6644",
+                          font=("Helvetica Neue", 13, "bold"), padx=28, pady=8)
+
+    root.mainloop()
+
+
+def show_prefs_window() -> None:
+    """Launch the preferences window in a subprocess."""
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), '--prefs'],
+        close_fds=True,
+    )
+
+
 def extract_meeting_url(event: dict) -> str | None:
     """Try to find a Google Meet / Zoom / Teams link in the event."""
     import html as _html
@@ -404,6 +585,7 @@ class MeetingAlarmApp(rumps.App):
 
         # Single separator before Quit avoids the double-None key collision
         self.menu.add(None)
+        self.menu.add(rumps.MenuItem("Preferences…", callback=lambda _: show_prefs_window()))
         self.menu.add(rumps.MenuItem("Quit", callback=lambda _: rumps.quit_application()))
 
     def _tick(self, _) -> None:
@@ -554,6 +736,11 @@ if __name__ == "__main__":
             sys.exit(1)
         _data = _json.loads(sys.argv[_idx + 1])
         _alarm_window_direct(_data.get("title", ""), _data.get("time", ""), _data.get("url") or None)
+        sys.exit(0)
+
+    # Preferences GUI: spawned by show_prefs_window()
+    if "--prefs" in sys.argv:
+        _prefs_window_direct()
         sys.exit(0)
 
     # List macOS calendars: python3 meeting_alarm.py --list-calendars

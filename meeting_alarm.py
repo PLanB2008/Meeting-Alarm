@@ -282,7 +282,7 @@ def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | N
     # Pulsing border animation
     pulse_colors = ["#ff3b30", "#ff6961", "#ff3b30", "#cc0000"]
     pulse_idx = [0]
-    after_id = [None]
+    after_id: list[str | None] = [None]
 
     def pulse():
         try:

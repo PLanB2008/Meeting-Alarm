@@ -181,6 +181,11 @@ def fetch_events(window_minutes: int = 1440, calendars: list[str] | None = None)
             "start":       {"dateTime": start_dt.isoformat()},
             "description": description,
         }
+        end_ns_ev = ev.endDate()
+        if end_ns_ev:
+            end_ts = end_ns_ev.timeIntervalSince1970()
+            end_dt = datetime.datetime.fromtimestamp(end_ts, tz=datetime.timezone.utc)
+            entry["end"] = {"dateTime": end_dt.isoformat()}
         if hangout_link:
             entry["hangoutLink"] = hangout_link
 

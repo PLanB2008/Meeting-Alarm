@@ -545,7 +545,79 @@ def format_event_time(event: dict) -> str:
         return dt.strftime("%H:%M") if config.USE_24H_TIME else dt.strftime("%-I:%M %p")
     except Exception:
         return start
- 
+
+
+def format_event_time_range(event: dict) -> str:
+    """Return a start–end time string, e.g. '09:30–10:00'."""
+    start_str = event["start"].get("dateTime")
+    end_str   = (event.get("end") or {}).get("dateTime")
+    fmt = "%H:%M" if config.USE_24H_TIME else "%-I:%M"
+    try:
+        s = datetime.datetime.fromisoformat(start_str).strftime(fmt)
+        if end_str:
+            e = datetime.datetime.fromisoformat(end_str).strftime(fmt)
+            return f"{s}–{e}"
+        return s
+    except Exception:
+        return start_str or ""
+
+
+def _event_style(ev: dict, local_now: datetime.datetime, blacklist: list) -> str:
+    """Return a display style key for the event: past | current | future | blacklisted."""
+    start_dt = datetime.datetime.fromisoformat(ev["start"]["dateTime"])
+    end_str  = (ev.get("end") or {}).get("dateTime")
+    end_dt   = datetime.datetime.fromisoformat(end_str) if end_str else start_dt + datetime.timedelta(hours=1)
+    if end_dt <= local_now:
+        return "past"
+    if is_blacklisted(ev.get("summary", ""), blacklist):
+        return "blacklisted"
+    if start_dt <= local_now:
+        return "current"
+    return "future"
+
+
+def _apply_menu_style(item: rumps.MenuItem, style: str) -> None:
+    """Set NSAttributedString on the underlying NSMenuItem for colored/bold text."""
+    try:
+        from AppKit import NSAttributedString, NSColor, NSFont  # type: ignore[import-untyped]
+        FG   = "NSForegroundColor"
+        FONT = "NSFont"
+        size = NSFont.menuFontOfSize_(0).pointSize()
+
+        # Tab stop for icon column alignment — isolated so a failure here
+        # doesn't break colours/fonts.
+        para_attrs: dict = {}
+        try:
+            from Foundation import NSMutableParagraphStyle  # type: ignore
+            para = NSMutableParagraphStyle.alloc().init()
+            para.setTabStops_([])
+            para.setDefaultTabInterval_(240)
+            para_attrs = {"NSParagraphStyle": para}
+        except Exception:
+            pass
+
+        if style == "past":
+            attrs = {FG: NSColor.secondaryLabelColor(),
+                     FONT: NSFont.menuFontOfSize_(size), **para_attrs}
+        elif style == "blacklisted":
+            attrs = {FG: NSColor.tertiaryLabelColor(),
+                     FONT: NSFont.menuFontOfSize_(size), **para_attrs}
+        elif style == "current":
+            attrs = {FG: NSColor.labelColor(),
+                     FONT: NSFont.boldSystemFontOfSize_(size), **para_attrs}
+        elif style == "header":
+            attrs = {FG: NSColor.secondaryLabelColor(),
+                     FONT: NSFont.boldSystemFontOfSize_(size - 1)}
+        else:  # future
+            attrs = {FG: NSColor.labelColor(),
+                     FONT: NSFont.menuFontOfSize_(size), **para_attrs}
+        item._menuitem.setAttributedTitle_(
+            NSAttributedString.alloc().initWithString_attributes_(item.title, attrs)
+        )
+    except Exception as e:
+        print(f"⚠️  _apply_menu_style({style}): {e}")
+
+
 # ── Already-alerted set (avoid double-triggering same event) ─────────────────
 alerted: set[str] = set()
 
@@ -567,26 +639,31 @@ class MeetingAlarmApp(rumps.App):
         rumps.Timer(self._tick, 1).start()
 
     def _build_menu(self) -> None:
-        # Use a unique numeric suffix for each item key to avoid collisions
-        # when meeting titles repeat or when separator keys clash.
         self.menu.clear()
         with _menu_lock:
             lines = list(_menu_state['lines'])
 
+        # "Today — 11. Jun" header
+        today_hdr = rumps.MenuItem(datetime.datetime.now().strftime("Today  —  %-d. %b"))
+        today_hdr.set_callback(None)
+        _apply_menu_style(today_hdr, "header")
+        self.menu.add(today_hdr)
+        self.menu.add(None)
+
         if lines:
-            for label, url in lines:
-                if url:
+            for label, url, style in lines:
+                if url and style not in ("past", "blacklisted"):
                     item = rumps.MenuItem(label, callback=lambda _, u=url: subprocess.Popen(["open", u]))
                 else:
                     item = rumps.MenuItem(label)
                     item.set_callback(None)
+                _apply_menu_style(item, style)
                 self.menu.add(item)
         else:
             placeholder = rumps.MenuItem("No meetings today")
             placeholder.set_callback(None)
             self.menu.add(placeholder)
 
-        # Single separator before Quit avoids the double-None key collision
         self.menu.add(None)
         self.menu.add(rumps.MenuItem("Preferences…", callback=lambda _: show_prefs_window()))
         self.menu.add(rumps.MenuItem("Quit", callback=lambda _: rumps.quit_application()))
@@ -657,13 +734,12 @@ def _poll(service) -> tuple[list[dict], list[dict]]:
 
     menu_lines = []
     for ev in all_today:
-        title   = ev.get("summary", "Untitled Meeting")
-        t_str   = format_event_time(ev)
-        url     = extract_meeting_url(ev)
-        link    = "  🔗" if url else ""
-        delta_m = int((datetime.datetime.fromisoformat(ev["start"]["dateTime"]) - local_now).total_seconds() / 60)
-        icon    = "🔕" if is_blacklisted(title, blacklist) else "🔔"
-        menu_lines.append((f"{icon}  {t_str}  {title}  ({format_delta(delta_m)}){link}", url))
+        title  = ev.get("summary", "Untitled Meeting")
+        t_str  = format_event_time_range(ev)
+        url    = extract_meeting_url(ev)
+        style  = _event_style(ev, local_now, blacklist)
+        icon   = "🔕" if is_blacklisted(title, blacklist) else ("🔗" if url else "")
+        menu_lines.append((f"{t_str}  {title}\t{icon}", url, style))
 
     with _menu_lock:
         _menu_state['lines']        = menu_lines

@@ -623,24 +623,28 @@ class MeetingAlarmApp(rumps.App):
             self.title = "No more meetings today"
 
 
-def _fetch_all_events(service, window_minutes: int) -> list[dict]:
-    """Return today's events from the configured calendar source (see config.yaml)."""
+def _fetch_all_events(service) -> list[dict]:
+    """Return all of today's events (past and future) from the configured calendar source."""
     if config.CALENDAR_SOURCE == "macos":
-        events = calendar_macos.fetch_events(window_minutes=window_minutes,
-                                             calendars=config.MACOS_CALENDARS)
+        events = calendar_macos.fetch_events(calendars=config.MACOS_CALENDARS)
     else:
-        events = calendar_google.fetch_events(service, window_minutes=window_minutes)
+        now       = datetime.datetime.now(datetime.timezone.utc).astimezone()
+        start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(datetime.timezone.utc)
+        end_utc   = now.replace(hour=23, minute=59, second=59, microsecond=0).astimezone(datetime.timezone.utc)
+        events = calendar_google.fetch_events(
+            service,
+            time_min=start_utc.isoformat().replace('+00:00', 'Z'),
+            time_max=end_utc.isoformat().replace('+00:00', 'Z'),
+        )
     return [ev for ev in events if ev["start"].get("dateTime")]
 
 
 def _poll(service) -> tuple[list[dict], list[dict]]:
     """Fetch today's events, update _menu_state, return (all_today, active_today)."""
-    local_now         = datetime.datetime.now(datetime.timezone.utc).astimezone()
-    end_of_day        = local_now.replace(hour=23, minute=59, second=59, microsecond=0)
-    minutes_until_end = max(1, int((end_of_day - local_now).total_seconds() / 60))
+    local_now = datetime.datetime.now(datetime.timezone.utc).astimezone()
 
-    blacklist    = load_blacklist()
-    all_today    = _fetch_all_events(service, minutes_until_end)
+    blacklist = load_blacklist()
+    all_today = _fetch_all_events(service)
     active_today = [ev for ev in all_today if not is_blacklisted(ev.get("summary", ""), blacklist)]
 
     next_ev      = next(

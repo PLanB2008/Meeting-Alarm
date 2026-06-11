@@ -51,11 +51,17 @@ def get_credentials():
     return creds
 
 
-def fetch_events(service, window_minutes: int = 60) -> list[dict]:
-    """Return Google Calendar events starting within the next window_minutes."""
+def fetch_events(service, window_minutes: int = 60,
+                 time_min: str | None = None, time_max: str | None = None) -> list[dict]:
+    """Return Google Calendar events in the given time range.
+
+    time_min / time_max override the default window (now → now+window_minutes).
+    """
     now = datetime.datetime.now(datetime.timezone.utc)
-    time_min = now.isoformat().replace('+00:00', 'Z')
-    time_max = (now + datetime.timedelta(minutes=window_minutes)).isoformat().replace('+00:00', 'Z')
+    if time_min is None:
+        time_min = now.isoformat().replace('+00:00', 'Z')
+    if time_max is None:
+        time_max = (now + datetime.timedelta(minutes=window_minutes)).isoformat().replace('+00:00', 'Z')
 
     result = service.events().list(
         calendarId="primary",

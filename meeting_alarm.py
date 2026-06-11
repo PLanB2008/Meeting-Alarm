@@ -223,8 +223,13 @@ def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | N
     sound_thread.start()
  
     root = tk.Tk()
-    root.title("⏰ MEETING NOW")
- 
+    root.title("Meeting Approaching")
+    try:
+        from AppKit import NSApplication  # type: ignore[import-untyped]
+        NSApplication.sharedApplication().setActivationPolicy_(1)  # accessory — no Dock icon
+    except Exception:
+        pass
+
     # Cover every screen
     sw = root.winfo_screenwidth()
     sh = root.winfo_screenheight()
@@ -242,16 +247,16 @@ def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | N
 
     tk.Label(frame, text="⏰", font=("SF Pro Display", 80), bg="#0a0a0a",
              fg="#ff3b30").pack(pady=(0, 10))
- 
-    tk.Label(frame, text="MEETING STARTING NOW", font=("SF Pro Display", 36, "bold"),
+
+    tk.Label(frame, text="MEETING APPROACHING", font=("SF Pro Display", 36, "bold"),
              bg="#0a0a0a", fg="#ff3b30").pack()
- 
+
     tk.Label(frame, text=event_title, font=("SF Pro Display", 28),
              bg="#0a0a0a", fg="#ffffff", wraplength=sw - 200).pack(pady=(20, 4))
- 
+
     tk.Label(frame, text=event_time, font=("SF Pro Rounded", 20),
              bg="#0a0a0a", fg="#aaaaaa").pack(pady=(0, 40))
- 
+
     def dismiss():
         if after_id[0] is not None:
             root.after_cancel(after_id[0])
@@ -265,15 +270,31 @@ def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | N
             root.after_cancel(after_id[0])
         stop_sound.set()
         root.destroy()
- 
+
+    muted = [False]
+
+    def mute_alarm():
+        if not muted[0]:
+            muted[0] = True
+            stop_sound.set()
+            mute_btn.configure(text="🔇  Muted", bg="#2c2c2e", fg="#666666",
+                               cursor="arrow")
+            mute_btn.unbind("<Button-1>")
+
     btn_frame = tk.Frame(frame, bg="#0a0a0a")
     btn_frame.pack()
- 
+
     if meeting_url:
         _tk_btn(btn_frame, "🚀  Join Meeting", dismiss,
                 bg="#30d158", fg="#000000",
                 font=("SF Pro Display", 22, "bold"),
                 padx=40, pady=18).pack(side="left", padx=12)
+
+    mute_btn = _tk_btn(btn_frame, "🔔  Mute Alarm", mute_alarm,
+                       bg="#3a3a3c", fg="#ffffff",
+                       font=("SF Pro Display", 18),
+                       padx=30, pady=18)
+    mute_btn.pack(side="left", padx=12)
 
     _tk_btn(btn_frame,
             "✓  I'm On It" if not meeting_url else "Dismiss",
@@ -350,6 +371,11 @@ def _prefs_window_direct() -> None:
 
     root = tk.Tk()
     root.title("Meeting Alarm — Preferences")
+    try:
+        from AppKit import NSApplication  # type: ignore[import-untyped]
+        NSApplication.sharedApplication().setActivationPolicy_(1)  # accessory — no Dock icon
+    except Exception:
+        pass
     root.configure(bg=BG)
     root.resizable(False, False)
 

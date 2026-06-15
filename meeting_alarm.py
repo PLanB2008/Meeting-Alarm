@@ -602,7 +602,29 @@ def _event_style(ev: dict, local_now: datetime.datetime, blacklist: list) -> str
     return "future"
 
 
-def _apply_menu_style(item: rumps.MenuItem, style: str) -> None:
+def _menu_tab_location(lines: list, padding: float = 24.0) -> float:
+    """X-coordinate (points) just past the widest 'time  title' prefix.
+
+    Used as the icon column's tab stop so icons line up regardless of title
+    length. Measured with the bold menu font (the widest case — 'current'
+    events) so no prefix ever overruns the column.
+    """
+    try:
+        from AppKit import NSAttributedString, NSFont  # type: ignore[import-untyped]
+        size = NSFont.menuFontOfSize_(0).pointSize()
+        attrs = {"NSFont": NSFont.boldSystemFontOfSize_(size)}
+        max_w = 0.0
+        for label, _url, _style in lines:
+            prefix = label.split("\t", 1)[0]
+            w = NSAttributedString.alloc().initWithString_attributes_(prefix, attrs).size().width
+            if w > max_w:
+                max_w = w
+        return max_w + padding
+    except Exception:
+        return 240.0
+
+
+def _apply_menu_style(item: rumps.MenuItem, style: str, tab_location: float = 240.0) -> None:
     """Set NSAttributedString on the underlying NSMenuItem for colored/bold text."""
     try:
         from AppKit import NSAttributedString, NSColor, NSFont  # type: ignore[import-untyped]
@@ -615,9 +637,10 @@ def _apply_menu_style(item: rumps.MenuItem, style: str) -> None:
         para_attrs: dict = {}
         try:
             from Foundation import NSMutableParagraphStyle  # type: ignore
+            from AppKit import NSTextTab  # type: ignore[import-untyped]
             para = NSMutableParagraphStyle.alloc().init()
-            para.setTabStops_([])
-            para.setDefaultTabInterval_(240)
+            tab = NSTextTab.alloc().initWithTextAlignment_location_options_(0, tab_location, {})
+            para.setTabStops_([tab])
             para_attrs = {"NSParagraphStyle": para}
         except Exception:
             pass
@@ -677,13 +700,14 @@ class MeetingAlarmApp(rumps.App):
         self.menu.add(None)
 
         if lines:
+            tab_loc = _menu_tab_location(lines)
             for label, url, style in lines:
                 if url and style not in ("past", "blacklisted"):
                     item = rumps.MenuItem(label, callback=lambda _, u=url: subprocess.Popen(["open", u]))
                 else:
                     item = rumps.MenuItem(label)
                     item.set_callback(None)
-                _apply_menu_style(item, style)
+                _apply_menu_style(item, style, tab_loc)
                 self.menu.add(item)
         else:
             placeholder = rumps.MenuItem("No meetings today")

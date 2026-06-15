@@ -20,4 +20,5 @@
 # - "^\\[tentative\\]"       # titles starting with [tentative]
 
 patterns:
-  - "^Lunch Blocker$" 
+  - "^Lunch Blocker$"
+  - "^Magnolia Services Weekly Meeting$"

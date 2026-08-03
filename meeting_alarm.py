@@ -336,10 +336,12 @@ def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | N
 def show_alarm_window(event_title: str, event_time: str, meeting_url: str | None) -> None:
     """Launch the alarm in a subprocess so tkinter and rumps don't share NSApplication."""
     payload = json.dumps({'title': event_title, 'time': event_time, 'url': meeting_url or ''})
-    subprocess.Popen(
+    proc = subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve()), '--alarm', payload],
         close_fds=True,
     )
+    _child_procs[:] = [p for p in _child_procs if p.poll() is None]
+    _child_procs.append(proc)
 
 
 def _prefs_window_direct() -> None:
@@ -518,10 +520,12 @@ def _prefs_window_direct() -> None:
 
 def show_prefs_window() -> None:
     """Launch the preferences window in a subprocess."""
-    subprocess.Popen(
+    proc = subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve()), '--prefs'],
         close_fds=True,
     )
+    _child_procs[:] = [p for p in _child_procs if p.poll() is None]
+    _child_procs.append(proc)
 
 
 def extract_meeting_url(event: dict) -> str | None:
@@ -670,6 +674,21 @@ def _apply_menu_style(item: rumps.MenuItem, style: str, tab_location: float = 24
 # ── Already-alerted set (avoid double-triggering same event) ─────────────────
 alerted: set[str] = set()
 
+# ── Spawned alarm/prefs windows (so we can clean them up on quit/restart) ────
+_child_procs: list[subprocess.Popen] = []
+
+
+def _cleanup_child_procs() -> None:
+    """Terminate any alarm/prefs window subprocesses spawned by this process."""
+    for p in _child_procs:
+        if p.poll() is None:
+            try:
+                p.terminate()
+            except ProcessLookupError:
+                pass
+    _child_procs.clear()
+
+
 # ── Tray app shared state ─────────────────────────────────────────────────────
 _alarm_queue: queue.Queue = queue.Queue()
 _menu_lock  = threading.Lock()
@@ -716,7 +735,11 @@ class MeetingAlarmApp(rumps.App):
 
         self.menu.add(None)
         self.menu.add(rumps.MenuItem("Preferences…", callback=lambda _: show_prefs_window()))
-        self.menu.add(rumps.MenuItem("Quit", callback=lambda _: rumps.quit_application()))
+        self.menu.add(rumps.MenuItem("Quit", callback=self._quit))
+
+    def _quit(self, _) -> None:
+        _cleanup_child_procs()
+        rumps.quit_application()
 
     def _tick(self, _) -> None:
         alarm: tuple | None = None
@@ -913,6 +936,16 @@ if __name__ == "__main__":
 
         _monitor_thread = threading.Thread(target=monitor_loop, args=(_service,), daemon=True)
         _monitor_thread.start()
+
+        # Clean up spawned alarm/prefs windows if this process is terminated
+        # (e.g. by "Restart Now" in Preferences, which SIGTERMs the old instance).
+        import signal as _signal
+
+        def _handle_sigterm(_signum, _frame):
+            _cleanup_child_procs()
+            sys.exit(0)
+
+        _signal.signal(_signal.SIGTERM, _handle_sigterm)
 
         # Hide Python from the Dock — menu bar only, alarm windows still work fine
         from AppKit import NSApplication, NSApplicationActivationPolicyAccessory  # type: ignore[import-untyped]

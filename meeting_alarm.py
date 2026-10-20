@@ -394,25 +394,41 @@ def _prefs_window_direct() -> None:
     # Center on screen
     root.update_idletasks()
     root.geometry("+%d+%d" % (
-        root.winfo_screenwidth() // 2 - 260,
+        root.winfo_screenwidth() // 2 - 400,
         root.winfo_screenheight() // 2 - 280,
     ))
 
     def _lbl(r: int, text: str) -> None:
-        tk.Label(root, text=text, bg=BG, fg=FG, font=("Helvetica Neue", 12),
+        tk.Label(gen, text=text, bg=BG, fg=FG, font=("Helvetica Neue", 12),
                  justify="right", anchor="e").grid(
                  row=r, column=0, sticky="ne", padx=(20, 8), pady=6)
 
     tk.Label(root, text="Preferences", bg=BG, fg=ACCENT,
              font=("Helvetica Neue", 17, "bold")).grid(
-             row=0, column=0, columnspan=2, padx=20, pady=(18, 14))
+             row=0, column=0, padx=20, pady=(18, 10))
 
-    row = 1
+    # Tabs — clam theme so the notebook can be styled to match the dark window
+    from tkinter import ttk
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    style.configure("TNotebook", background=BG, borderwidth=0)
+    style.configure("TNotebook.Tab", background=ENTRY_BG, foreground=FG,
+                    padding=(16, 6), font=("Helvetica Neue", 12), borderwidth=0)
+    style.map("TNotebook.Tab", background=[("selected", ACCENT)],
+              foreground=[("selected", "#ffffff")])
+    notebook = ttk.Notebook(root)
+    notebook.grid(row=1, column=0, padx=20, sticky="nsew")
+    gen = tk.Frame(notebook, bg=BG)
+    bl_tab = tk.Frame(notebook, bg=BG)
+    notebook.add(gen, text="General")
+    notebook.add(bl_tab, text="Blacklist")
+
+    row = 0
 
     # Calendar source
     _lbl(row, "Calendar source:")
     cal_var = tk.StringVar(value=cfg["calendar_source"])
-    cal_f = tk.Frame(root, bg=BG)
+    cal_f = tk.Frame(gen, bg=BG)
     cal_f.grid(row=row, column=1, sticky="w", padx=(0, 20), pady=6)
     for val, label in [("google", "Google Calendar"), ("macos", "macOS Calendar")]:
         tk.Radiobutton(cal_f, text=label, variable=cal_var, value=val,
@@ -422,7 +438,7 @@ def _prefs_window_direct() -> None:
 
     # macOS calendars
     _lbl(row, "macOS calendars\n(one per line):")
-    macos_txt = tk.Text(root, width=34, height=4, bg=ENTRY_BG, fg=FG,
+    macos_txt = tk.Text(gen, width=34, height=4, bg=ENTRY_BG, fg=FG,
                         insertbackground=FG, relief="flat", font=("Menlo", 11),
                         padx=6, pady=4)
     macos_txt.grid(row=row, column=1, sticky="w", padx=(0, 20), pady=6)
@@ -432,7 +448,7 @@ def _prefs_window_direct() -> None:
     # Alert minutes before
     _lbl(row, "Alert minutes before:")
     alert_var = tk.IntVar(value=cfg["alert_minutes_before"])
-    tk.Spinbox(root, from_=0, to=60, textvariable=alert_var, width=5,
+    tk.Spinbox(gen, from_=0, to=60, textvariable=alert_var, width=5,
                bg=ENTRY_BG, fg=FG, buttonbackground=ENTRY_BG, insertbackground=FG,
                relief="flat", font=("Helvetica Neue", 12)).grid(
                row=row, column=1, sticky="w", padx=(0, 20), pady=6)
@@ -441,7 +457,7 @@ def _prefs_window_direct() -> None:
     # Poll interval
     _lbl(row, "Poll interval (secs):")
     poll_var = tk.IntVar(value=cfg["poll_interval_secs"])
-    tk.Spinbox(root, from_=10, to=600, textvariable=poll_var, width=5,
+    tk.Spinbox(gen, from_=10, to=600, textvariable=poll_var, width=5,
                bg=ENTRY_BG, fg=FG, buttonbackground=ENTRY_BG, insertbackground=FG,
                relief="flat", font=("Helvetica Neue", 12)).grid(
                row=row, column=1, sticky="w", padx=(0, 20), pady=6)
@@ -450,7 +466,7 @@ def _prefs_window_direct() -> None:
     # Alarm volume
     _lbl(row, "Alarm volume:")
     vol_var = tk.DoubleVar(value=cfg["alarm_volume"])
-    vol_f = tk.Frame(root, bg=BG)
+    vol_f = tk.Frame(gen, bg=BG)
     vol_f.grid(row=row, column=1, sticky="w", padx=(0, 20), pady=6)
     vol_label = tk.Label(vol_f, text=f"{cfg['alarm_volume']:.0%}", bg=BG, fg=FG,
                          font=("Helvetica Neue", 11), width=5)
@@ -466,7 +482,7 @@ def _prefs_window_direct() -> None:
     # 24-hour time
     _lbl(row, "24-hour time:")
     h24_var = tk.BooleanVar(value=bool(cfg["use_24h_time"]))
-    tk.Checkbutton(root, variable=h24_var,
+    tk.Checkbutton(gen, variable=h24_var,
                    bg=BG, fg=FG, selectcolor=ENTRY_BG, activebackground=BG,
                    font=("Helvetica Neue", 12)).grid(
                    row=row, column=1, sticky="w", padx=(0, 20), pady=6)
@@ -474,21 +490,94 @@ def _prefs_window_direct() -> None:
 
     # Alarm sounds
     _lbl(row, "Alarm sounds\n(one per line):")
-    sounds_txt = tk.Text(root, width=44, height=4, bg=ENTRY_BG, fg=FG,
+    sounds_txt = tk.Text(gen, width=44, height=4, bg=ENTRY_BG, fg=FG,
                          insertbackground=FG, relief="flat", font=("Menlo", 10),
                          padx=6, pady=4)
     sounds_txt.grid(row=row, column=1, sticky="w", padx=(0, 20), pady=6)
     sounds_txt.insert("1.0", "\n".join(cfg.get("alarm_sounds") or []))
-    row += 1
+
+    # Blacklist tab — raw blacklist.yaml, saved verbatim so comments are kept
+    tk.Label(bl_tab, text="Meetings whose title matches a pattern are ignored. "
+                          "Changes apply on the next poll — no restart needed.",
+             bg=BG, fg="#aaaaaa", font=("Helvetica Neue", 11), anchor="w").pack(
+             fill="x", padx=12, pady=(12, 6))
+    bl_f = tk.Frame(bl_tab, bg=BG)
+    bl_f.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+    def _auto_scrollbar(orient: str, side: str):
+        """Scrollbar that hides when everything fits. It sits in a fixed-size
+        slot so the window doesn't resize when it appears or disappears."""
+        slot = tk.Frame(bl_f, bg=ENTRY_BG)
+        sb = tk.Scrollbar(slot, orient=orient)
+        if orient == "vertical":
+            slot.configure(width=sb.winfo_reqwidth())
+        else:
+            slot.configure(height=sb.winfo_reqheight())
+        slot.pack_propagate(False)
+        slot.pack(side=side, fill="y" if orient == "vertical" else "x")
+
+        def _set(first: float, last: float) -> None:
+            if float(first) <= 0.0 and float(last) >= 1.0:
+                sb.pack_forget()
+            elif not sb.winfo_ismapped():
+                sb.pack(fill="both", expand=True)
+            sb.set(first, last)
+        return sb, _set
+
+    # Horizontal first so it spans the full width along the bottom
+    bl_xscroll, _bl_xset = _auto_scrollbar("horizontal", "bottom")
+    bl_yscroll, _bl_yset = _auto_scrollbar("vertical", "right")
+    bl_txt = tk.Text(bl_f, width=92, height=20, bg=ENTRY_BG, fg=FG,
+                     insertbackground=FG, relief="flat", font=("Menlo", 11),
+                     padx=6, pady=4, undo=True, wrap="none",
+                     xscrollcommand=_bl_xset, yscrollcommand=_bl_yset)
+    bl_txt.pack(side="left", fill="both", expand=True)
+    bl_xscroll.config(command=bl_txt.xview)
+    bl_yscroll.config(command=bl_txt.yview)
+    try:
+        bl_txt.insert("1.0", BLACKLIST_FILE.read_text())
+    except FileNotFoundError:
+        bl_txt.insert("1.0", "patterns:\n  - \"^Lunch$\"\n")
 
     # Status label
     status_var = tk.StringVar(value="")
-    tk.Label(root, textvariable=status_var, bg=BG, fg="#88cc88",
-             font=("Helvetica Neue", 11)).grid(
-             row=row, column=0, columnspan=2, pady=(4, 0))
-    row += 1
+    status_lbl = tk.Label(root, textvariable=status_var, bg=BG, fg="#88cc88",
+                          font=("Helvetica Neue", 11))
+    status_lbl.grid(row=2, column=0, pady=(8, 0))
+    row = 3
+
+    def _validate_blacklist(text: str) -> str | None:
+        """Return an error message if the blacklist YAML or a pattern is invalid."""
+        try:
+            data = yaml.safe_load(text) or {}
+        except yaml.YAMLError as e:
+            return f"Blacklist YAML error: {e}".splitlines()[0]
+        if not isinstance(data, dict):
+            return "Blacklist must be a mapping with a 'patterns:' list"
+        patterns = data.get("patterns") or []
+        if not isinstance(patterns, list):
+            return "'patterns' must be a list"
+        for p in patterns:
+            try:
+                re.compile(str(p))
+            except re.error as e:
+                return f"Invalid regex {p!r}: {e}"
+        return None
 
     def _save() -> None:
+        bl_text = bl_txt.get("1.0", "end-1c")
+        err = _validate_blacklist(bl_text)
+        if err:
+            status_lbl.config(fg="#ff6961")
+            status_var.set(err)
+            notebook.select(bl_tab)
+            return
+        status_lbl.config(fg="#88cc88")
+        try:
+            BLACKLIST_FILE.write_text(bl_text if bl_text.endswith("\n") else bl_text + "\n")
+        except Exception as e:
+            status_var.set(f"Error saving blacklist: {e}")
+            return
+
         new_cfg = {
             "calendar_source":      cal_var.get(),
             "macos_calendars":      [l.strip() for l in macos_txt.get("1.0", "end").splitlines() if l.strip()],
@@ -519,7 +608,7 @@ def _prefs_window_direct() -> None:
         root.destroy()
 
     btn_f = tk.Frame(root, bg=BG)
-    btn_f.grid(row=row, column=0, columnspan=2, pady=(10, 22))
+    btn_f.grid(row=row, column=0, pady=(10, 22))
     _tk_btn(btn_f, "Save", _save, bg=ACCENT,
             font=("Helvetica Neue", 13, "bold"), padx=28, pady=8).pack(side="left")
     restart_btn = _tk_btn(btn_f, "Restart Now", _restart, bg="#cc6644",

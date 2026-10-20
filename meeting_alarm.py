@@ -257,19 +257,28 @@ def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | N
     tk.Label(frame, text=event_time, font=("SF Pro Rounded", 20),
              bg="#0a0a0a", fg="#aaaaaa").pack(pady=(0, 40))
 
-    def dismiss():
+    # Set when the window is closed. With Tk 9, root.update() keeps working after
+    # root.destroy() instead of raising TclError, so the event loop needs this flag.
+    closed = threading.Event()
+
+    def close_window():
+        if closed.is_set():
+            return
+        closed.set()
         if after_id[0] is not None:
             root.after_cancel(after_id[0])
         stop_sound.set()
-        if meeting_url:
-            subprocess.Popen(["open", meeting_url])
         root.destroy()
 
+    def dismiss():
+        if meeting_url:
+            subprocess.Popen(["open", meeting_url])
+        close_window()
+
     def dismiss_no_url():
-        if after_id[0] is not None:
-            root.after_cancel(after_id[0])
-        stop_sound.set()
-        root.destroy()
+        close_window()
+
+    root.protocol("WM_DELETE_WINDOW", close_window)
 
     muted = [False]
 
@@ -323,7 +332,7 @@ def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | N
     after_id[0] = root.after(600, pulse)
     # Manual event loop instead of mainloop() — avoids AppKit run-loop conflict
     # when called from a rumps NSTimer callback.
-    while True:
+    while not closed.is_set():
         try:
             root.update()
             root.update_idletasks()
@@ -331,6 +340,7 @@ def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | N
             break
         time.sleep(0.01)
     stop_sound.set()   # ensure sound stops if window closed any other way
+    sound_thread.join(timeout=2)  # let play_alarm restore the speaker volume
 
 
 def show_alarm_window(event_title: str, event_time: str, meeting_url: str | None) -> None:

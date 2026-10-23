@@ -18,6 +18,7 @@ import sys
 import json
 import re
 import queue
+import signal
 from pathlib import Path
 
 import yaml
@@ -26,6 +27,7 @@ import rumps
 import calendar_google
 import calendar_macos
 import config
+import remote
 
 BLACKLIST_FILE = Path(__file__).parent / "blacklist.yaml"
 
@@ -54,7 +56,7 @@ def is_blacklisted(title: str, patterns: list[re.Pattern]) -> bool:
     return any(p.search(title) for p in patterns)
 
 # ── Sound ─────────────────────────────────────────────────────────────────────
-from typing import Any
+from typing import Any, Literal
 sd: Any
 sf: Any
 try:
@@ -330,9 +332,23 @@ def _alarm_window_direct(event_title: str, event_time: str, meeting_url: str | N
             pass
 
     after_id[0] = root.after(600, pulse)
+
+    # Phone remote: the tray app sends SIGUSR1 to mute and SIGTERM to dismiss.
+    # Handlers only set flags; the event loop below acts on them.
+    remote_mute = threading.Event()
+    remote_close = threading.Event()
+    signal.signal(signal.SIGUSR1, lambda *_: remote_mute.set())
+    signal.signal(signal.SIGTERM, lambda *_: remote_close.set())
+
     # Manual event loop instead of mainloop() — avoids AppKit run-loop conflict
     # when called from a rumps NSTimer callback.
     while not closed.is_set():
+        if remote_close.is_set():
+            close_window()
+            break
+        if remote_mute.is_set():
+            remote_mute.clear()
+            mute_alarm()
         try:
             root.update()
             root.update_idletasks()
@@ -352,6 +368,50 @@ def show_alarm_window(event_title: str, event_time: str, meeting_url: str | None
     )
     _child_procs[:] = [p for p in _child_procs if p.poll() is None]
     _child_procs.append(proc)
+    with _alarms_lock:
+        _active_alarms[proc.pid] = {'proc': proc, 'title': event_title, 'time': event_time,
+                                    'url': meeting_url or '', 'muted': False}
+
+
+# ── Phone remote: active alarm windows, controlled via remote.py ─────────────
+_active_alarms: dict[int, dict] = {}   # pid → {proc, title, time, url, muted}
+_alarms_lock = threading.Lock()
+_remote_url: str | None = None         # set at startup when the remote server is running
+
+
+def _remote_state() -> dict:
+    """Active alarms plus today's schedule, as served to the phone page."""
+    with _alarms_lock:
+        for pid in [pid for pid, a in _active_alarms.items() if a['proc'].poll() is not None]:
+            del _active_alarms[pid]
+        alarms = [{'id': pid, 'title': a['title'], 'time': a['time'],
+                   'url': a['url'], 'muted': a['muted']}
+                  for pid, a in _active_alarms.items()]
+    with _menu_lock:
+        schedule = list(_menu_state['schedule'])
+    return {'alarms': alarms, 'schedule': schedule}
+
+
+def _remote_signal(pid: int, sig: int) -> bool:
+    with _alarms_lock:
+        alarm = _active_alarms.get(pid)
+        if alarm is None or alarm['proc'].poll() is not None:
+            return False
+        try:
+            alarm['proc'].send_signal(sig)
+        except ProcessLookupError:
+            return False
+        if sig == signal.SIGUSR1:
+            alarm['muted'] = True
+        return True
+
+
+def _remote_mute(pid: int) -> bool:
+    return _remote_signal(pid, signal.SIGUSR1)
+
+
+def _remote_dismiss(pid: int) -> bool:
+    return _remote_signal(pid, signal.SIGTERM)
 
 
 def _prefs_window_direct() -> None:
@@ -366,6 +426,8 @@ def _prefs_window_direct() -> None:
         "alarm_volume":         0.8,
         "use_24h_time":         True,
         "alarm_sounds":         ["sounds/tunetank.com_notification-warning-alert.wav"],
+        "remote_enabled":       True,
+        "remote_port":          8765,
     }
 
     try:
@@ -495,6 +557,20 @@ def _prefs_window_direct() -> None:
                          padx=6, pady=4)
     sounds_txt.grid(row=row, column=1, sticky="w", padx=(0, 20), pady=6)
     sounds_txt.insert("1.0", "\n".join(cfg.get("alarm_sounds") or []))
+    row += 1
+
+    # Phone remote
+    _lbl(row, "Phone remote:")
+    remote_var = tk.BooleanVar(value=bool(cfg["remote_enabled"]))
+    remote_port_var = tk.IntVar(value=cfg["remote_port"])
+    remote_f = tk.Frame(gen, bg=BG)
+    remote_f.grid(row=row, column=1, sticky="w", padx=(0, 20), pady=6)
+    tk.Checkbutton(remote_f, text="Enabled   port:", variable=remote_var,
+                   bg=BG, fg=FG, selectcolor=ENTRY_BG, activebackground=BG,
+                   font=("Helvetica Neue", 12)).pack(side="left")
+    tk.Spinbox(remote_f, from_=1024, to=65535, textvariable=remote_port_var, width=6,
+               bg=ENTRY_BG, fg=FG, buttonbackground=ENTRY_BG, insertbackground=FG,
+               relief="flat", font=("Helvetica Neue", 12)).pack(side="left", padx=(6, 0))
 
     # Blacklist tab — raw blacklist.yaml, saved verbatim so comments are kept
     tk.Label(bl_tab, text="Meetings whose title matches a pattern are ignored. "
@@ -503,7 +579,8 @@ def _prefs_window_direct() -> None:
              fill="x", padx=12, pady=(12, 6))
     bl_f = tk.Frame(bl_tab, bg=BG)
     bl_f.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-    def _auto_scrollbar(orient: str, side: str):
+    def _auto_scrollbar(orient: Literal["horizontal", "vertical"],
+                        side: Literal["right", "bottom"]):
         """Scrollbar that hides when everything fits. It sits in a fixed-size
         slot so the window doesn't resize when it appears or disappears."""
         slot = tk.Frame(bl_f, bg=ENTRY_BG)
@@ -586,6 +663,8 @@ def _prefs_window_direct() -> None:
             "alarm_volume":         round(vol_var.get(), 2),
             "use_24h_time":         bool(h24_var.get()),
             "alarm_sounds":         [l.strip() for l in sounds_txt.get("1.0", "end").splitlines() if l.strip()],
+            "remote_enabled":       bool(remote_var.get()),
+            "remote_port":          remote_port_var.get(),
         }
         try:
             header = "# Meeting Alarm configuration\n# Changes take effect on the next restart.\n\n"
@@ -793,6 +872,7 @@ _alarm_queue: queue.Queue = queue.Queue()
 _menu_lock  = threading.Lock()
 _menu_state: dict = {
     'lines':        [],
+    'schedule':     [],    # list of event dicts for the phone remote
     'next_dt':      None,  # ISO datetime str of the next upcoming event
     'next_summary': '',    # title of the next upcoming event
     'dirty':        False,
@@ -833,6 +913,9 @@ class MeetingAlarmApp(rumps.App):
             self.menu.add(placeholder)
 
         self.menu.add(None)
+        if _remote_url:
+            self.menu.add(rumps.MenuItem("📱  Phone Remote…",
+                                         callback=lambda _, u=_remote_url: subprocess.Popen(["open", u + "&qr=1"])))
         self.menu.add(rumps.MenuItem("Preferences…", callback=lambda _: show_prefs_window()))
         self.menu.add(rumps.MenuItem("Quit", callback=self._quit))
 
@@ -905,6 +988,7 @@ def _poll(service) -> tuple[list[dict], list[dict]]:
     next_summary = next_ev.get("summary", "Untitled Meeting") if next_ev else ""
 
     menu_lines = []
+    schedule   = []   # structured copy for the phone remote
     for ev in all_today:
         title  = ev.get("summary", "Untitled Meeting")
         t_str  = format_event_time_range(ev)
@@ -912,9 +996,12 @@ def _poll(service) -> tuple[list[dict], list[dict]]:
         style  = _event_style(ev, local_now, blacklist)
         icon   = "🔕" if is_blacklisted(title, blacklist) else ("🔗" if url else "")
         menu_lines.append((f"{t_str}  {title}\t{icon}", url, style))
+        schedule.append({'time': t_str, 'title': title, 'url': url or '', 'style': style,
+                         'start': ev["start"]["dateTime"]})
 
     with _menu_lock:
         _menu_state['lines']        = menu_lines
+        _menu_state['schedule']     = schedule
         _menu_state['next_dt']      = next_dt
         _menu_state['next_summary'] = next_summary
         _menu_state['dirty']        = True
@@ -1036,13 +1123,23 @@ if __name__ == "__main__":
         _monitor_thread = threading.Thread(target=monitor_loop, args=(_service,), daemon=True)
         _monitor_thread.start()
 
+        if config.REMOTE_ENABLED:
+            try:
+                _remote_url = remote.start(config.REMOTE_PORT, _remote_state,
+                                           _remote_mute, _remote_dismiss)
+                print(f"📱  Phone remote: {_remote_url}")
+            except OSError as e:
+                print(f"⚠️  Phone remote disabled — could not listen on port {config.REMOTE_PORT}: {e}")
+
         # Clean up spawned alarm/prefs windows if this process is terminated
         # (e.g. by "Restart Now" in Preferences, which SIGTERMs the old instance).
         import signal as _signal
 
         def _handle_sigterm(_signum, _frame):
             _cleanup_child_procs()
-            sys.exit(0)
+            # Not sys.exit(): the handler runs inside a rumps/PyObjC callback,
+            # which swallows SystemExit and leaves the app running.
+            os._exit(0)
 
         _signal.signal(_signal.SIGTERM, _handle_sigterm)
 

@@ -16,6 +16,8 @@ _DEFAULTS = {
     "alarm_volume":         0.8,
     "use_24h_time":         True,
     "alarm_sounds":         ["sounds/tunetank.com_notification-warning-alert.wav"],
+    "remote_enabled":       True,
+    "remote_port":          8765,
 }
 
 
@@ -39,6 +41,8 @@ ALERT_MINUTES_BEFORE: int       = int(_cfg["alert_minutes_before"])
 POLL_INTERVAL_SECS:   int       = int(_cfg["poll_interval_secs"])
 ALARM_VOLUME:         float     = float(_cfg["alarm_volume"])
 USE_24H_TIME:         bool      = bool(_cfg["use_24h_time"])
+REMOTE_ENABLED:       bool      = bool(_cfg["remote_enabled"])
+REMOTE_PORT:          int       = int(_cfg["remote_port"])
 
 def _resolve(p: str) -> str:
     path = Path(p)

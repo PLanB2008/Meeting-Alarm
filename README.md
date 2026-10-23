@@ -136,6 +136,22 @@ patterns:
 
 Blacklisted meetings still appear in the menu dropdown with a 🔕 icon, but no alarm fires.
 
+You can also edit the blacklist in **Preferences… → Blacklist**.
+
+---
+
+## Phone remote
+
+Mute or dismiss a ringing alarm from your phone, e.g. when you're in another room.
+
+1. Choose **📱 Phone Remote…** in the menu bar. A page opens with a QR code.
+2. Scan it with your phone (it must be on the same Wi-Fi) and bookmark the page.
+3. When an alarm rings, the page shows it with **Dismiss**, **Mute** and **Join on phone** buttons.
+
+The link contains a secret token (stored in `.remote_token`), so others on the network
+can't control your alarms. Delete that file and restart to get a new link.
+Turn the remote off or change its port (default `8765`) in **Preferences…**.
+
 ---
 
 ## Auto-start at login (optional)

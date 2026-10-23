@@ -12,3 +12,5 @@ Meeting Alarm.app
 # Google Calendar credentials and auth token
 credentials.json
 *.pickle
+# Phone remote access token
+.remote_token

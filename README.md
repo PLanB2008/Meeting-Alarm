@@ -19,12 +19,15 @@ and the macOS Calendar app.
 
 ## Step 1 — Install Python dependencies
 
-Open **Terminal** and run:
+The app needs Tk, which Homebrew ships separately from Python (`python-tk@<version>`). Open **Terminal** and run:
 
 ```bash
-pip3 install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client \
-             rumps sounddevice soundfile pyyaml pyobjc-framework-EventKit
+brew install python@3.15 python-tk@3.15
+/opt/homebrew/bin/python3.15 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
+
+Then use `.venv/bin/python` wherever this guide says `python3` (or run `source .venv/bin/activate` first).
 
 ---
 

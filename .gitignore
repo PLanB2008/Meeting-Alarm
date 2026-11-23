@@ -5,6 +5,7 @@
 __pycache__/
 *.pyc
 *.pyo
+.venv/
 
 # App bundle (built by build_app.sh)
 Meeting Alarm.app

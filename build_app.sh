@@ -6,7 +6,11 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON="$(command -v python3)"
+if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+  PYTHON="$SCRIPT_DIR/.venv/bin/python"
+else
+  PYTHON="$(command -v python3)"
+fi
 APP_NAME="Meeting Alarm"
 APP_PATH="$SCRIPT_DIR/$APP_NAME.app"
 LAUNCHER="$APP_PATH/Contents/MacOS/meeting_alarm"
